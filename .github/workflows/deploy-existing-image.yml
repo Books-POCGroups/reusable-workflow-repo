@@ -1,0 +1,195 @@
+name: MS Service Existing Image Deploy
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: "Domain of the service (eg: books)"
+        type: string
+        required: true
+      service_name:
+        description: "Name of the service"
+        type: string
+        required: true
+      skip_env:
+        description: "Comma-separated list of environments to skip"
+        type: string
+        required: true
+      image_tag:
+        description: "Existing image tag in ECR"
+        type: string
+        required: true
+      runner:
+        description: "Codebuild runner for the pipeline"
+        default: codebuild-mib2-rest-deploy-runner
+        type: string
+        required: true
+    secrets:
+      GH_PAT_TOKEN:
+        description: "GitHub Personal Access Token"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+  attestations: write
+  security-events: write
+
+env:
+  ECR_REPOSITORY: mib2-microservice-repo
+  IMAGE_URI: ""
+
+jobs:
+  verify-scan-deploy:
+    name: Verify, Scan & Deploy - ${{ inputs.service_name }}
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+
+      - name: Checkout workflow repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 #v7.0.0
+        with:
+          repository: AbuDhabiCommercialBank/mibapp-workflow-repo
+          token: ${{ secrets.GH_PAT_TOKEN }}
+          path: workflow-repo
+          ref: main
+
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@f2e9fc6c2b355c1890b65e6f6f0e2ac3e6e22f78 # v2.1.2
+
+      - name: Set image env
+        run: |
+          echo "ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> "$GITHUB_ENV"
+          echo "IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ inputs.image_tag }}" >> "$GITHUB_ENV"
+
+      - name: Verify image exists in ECR
+        run: |
+          aws ecr describe-images \
+            --repository-name "${{ env.ECR_REPOSITORY }}" \
+            --image-ids imageTag="${{ inputs.image_tag }}"
+
+      - name: Prepare Trivy Ignore File
+        run: |
+          IGNORE_FILE="./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/.trivyignore"
+          mkdir -p "$(dirname "$IGNORE_FILE")"
+          if [ ! -f "$IGNORE_FILE" ]; then
+            touch "$IGNORE_FILE"
+            echo "Created empty .trivyignore at $IGNORE_FILE"
+          else
+            echo ".trivyignore already exists at $IGNORE_FILE"
+          fi
+
+      - name: Checkout workflow repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: AbuDhabiCommercialBank/mibapp-workflow-repo
+          token: ${{ secrets.GH_PAT_TOKEN }}
+          path: workflow-repo
+          ref: main
+
+      - name: Scan image
+        if: github.ref == 'refs/heads/main'
+        uses: ./workflow-repo/.github/actions/trivy
+        with:
+          scan_type: image
+          scan_ref: ${{ env.IMAGE_URI }}
+          severity: MEDIUM,HIGH,CRITICAL
+          ignore_file: ./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/.trivyignore
+
+      - name: Store image reference
+        run: |
+          echo "Storing image reference into image_ref.txt"
+          echo "$IMAGE_URI" > image_ref.txt 
+
+      - name: Upload Service Build Reference
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: ServiceBuildRef
+          path: image_ref.txt
+          retention-days: 10
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Upload Complete Repo as artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: workflow-repo
+          path: ./workflow-repo
+          retention-days: 10
+          if-no-files-found: error
+          overwrite: true
+      - name: Write summary
+        run: |
+          {
+            echo "## Deploy Summary"
+            echo "**Service:** \`${{ inputs.service_name }}\`"
+            echo "**Image:** \`$IMAGE_URI\`"
+            echo "**ECR Repository:** \`${{ env.ECR_REPOSITORY }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-SIT:
+    needs: verify-scan-deploy
+    name: Deploy SIT
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment: sit
+      domain: ${{ inputs.domain }}
+      skip_env: ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}
+
+  validate-branch:
+    needs: deploy-SIT
+    name: Validate Branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "❌ Remaining workflow are skipped and must run only on main branch"
+            exit 1
+          fi
+
+  deploy-UAT:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy-SIT, validate-branch]
+    name: Deploy UAT
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment: uat
+      domain: ${{ inputs.domain }}
+      skip_env: ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}
+    
+  deploy-PREPROD:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy-UAT]
+    name: Deploy PREPROD
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment: preprod
+      domain: ${{ inputs.domain }}
+      skip_env: ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}
+
+  deploy-GRC-Approval:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    name: Approval for PROD
+    needs: [deploy-PREPROD]
+    environment: it-grc-approval
+    steps:
+      - name: Production deployment approval
+        run: echo "Staging for production deployment"
+
+  deploy-PROD:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy-GRC-Approval]
+    name: Deploy PROD
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment: prod
+      domain: ${{ inputs.domain }}
+      skip_env: ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}

@@ -1,0 +1,35 @@
+pkg:
+  types:
+    - os
+
+license:
+  full: false
+  ignored:
+    # SPDX (keep for app/language-ecosystem deps that do use SPDX)
+    - GPL-2.0
+    - GPL-2.0-only
+    - GPL-2.0-or-later
+    - GPL-3.0
+    - GPL-3.0-only
+    - GPL-3.0-or-later
+    - LGPL-2.1
+    - LGPL-3.0
+    - MPL-2.0
+    # Legacy/RPM-style strings seen in OS package metadata
+    - GPLv2
+    - GPLv2+
+    - GPLv3+
+    - LGPLv2
+    - LGPLv2+
+    - LGPLv3+
+    - MPLv1.1
+    - MPLv2.0
+    - "GPLv2+ or LGPLv3+"
+    - "GPLv2+ and LGPLv2+"
+    - "GPLv3+ and LGPLv2+"
+    - "LGPLv2+ and GPLv3+"
+    - "GPLv3+ and GPL and LGPLv3+ and LGPL and BSD"
+    - "(GPLv2+ or LGPLv3+) and GPLv3+"
+    - "LGPLv3+ or GPLv2+"
+    - "BSD and LGPLv2 and Sleepycat"
+    - "BSD and GPLv2+"

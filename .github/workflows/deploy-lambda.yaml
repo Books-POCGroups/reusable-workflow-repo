@@ -1,0 +1,179 @@
+name: Reusable Lambda Deployment
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: "Microservice's domain which determines target namespace, directory structure on workflow repo, etc"
+        required: true
+        type: string
+      environment:
+        description: Deployment Environment
+        required: true
+        type: string
+      cicd_bot_app_id:
+        required: true
+        type: string
+      runner:
+        description: "Codebuild runner for the pipeline"
+        default: codebuild-mib2-deafult-ubuntu-runner
+        type: string
+        required: false
+    secrets:
+      CICD_BOT_APP_KEY:
+        description: "GitHub App private key for the CICD bot"
+        required: true
+permissions:
+  id-token: write
+  contents: read
+  packages: write
+
+jobs:
+  load-config:
+    name: Load Lambda config
+    runs-on: ${{ inputs.runner }}-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      account_id: ${{ steps.config.outputs.account_id }}
+      region: ${{ steps.config.outputs.region }}
+      project_name: ${{ steps.config.outputs.project_name }}
+      image_uri: ${{ steps.config.outputs.image_uri }}
+      time_out: ${{ steps.config.outputs.time_out }}
+      memory_size: ${{ steps.config.outputs.memory_size }}
+      existing_lambda_execution_role: ${{ steps.config.outputs.existing_lambda_execution_role }}
+      architectures: ${{ steps.config.outputs.architectures }}
+      publish: ${{ steps.config.outputs.publish }}
+      reserved_concurrent_executions: ${{ steps.config.outputs.reserved_concurrent_executions }}
+      lambda_function_name: ${{ steps.config.outputs.lambda_function_name }}
+      alias_name: ${{ steps.config.outputs.alias_name }}
+      alias_description: ${{ steps.config.outputs.alias_description }}
+      provisioned_concurrent_executions: ${{ steps.config.outputs.provisioned_concurrent_executions }}
+      ApplicationName: ${{ steps.config.outputs.ApplicationName }}
+      DataClassification: ${{ steps.config.outputs.DataClassification }}
+      BusinessCriticality: ${{ steps.config.outputs.BusinessCriticality }}
+      BusinessUnit: ${{ steps.config.outputs.BusinessUnit }}
+      CostCenter: ${{ steps.config.outputs.CostCenter }}
+    steps:
+      - name: CICD Bot token
+        id: cicd-bot-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ inputs.cicd_bot_app_id }}
+          private-key: ${{ secrets.CICD_BOT_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout Caller Repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 #v7.0.0
+
+      - name: Checkout workflow repo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 #v7.0.0
+        with:
+          repository: AbuDhabiCommercialBank/mibapp-workflow-repo
+          token: ${{ steps.cicd-bot-token.outputs.token }}
+          path: workflow-repo
+          ref: main
+
+      - name: Install yq
+        run: |
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.25.1/yq_linux_amd64 -o /usr/local/bin/yq
+          echo "57b6247bc2406c20a887aee3594399e081759601fd2f8ae9df21938499d76c81  /usr/local/bin/yq" | sha256sum --check
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Read Lambda config
+        id: config
+        env:
+          DOMAIN: ${{ inputs.domain }}
+          SERVICE: mib-docscan-lambda-service
+          ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE_URI: ${{ inputs.image_uri }}
+        run: |
+          set -euo pipefail
+
+          COMMON_FILE="workflow-repo/env/${DOMAIN}/${SERVICE}/lambda-config.yaml"
+          ENV_FILE="workflow-repo/env/${DOMAIN}/${SERVICE}/${ENVIRONMENT}/config.yaml"
+
+          for f in "$COMMON_FILE" "$ENV_FILE"; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::Missing config file: $f"
+              exit 1
+            fi
+          done
+
+          get_common() {
+            yq e ".$1 // \"\"" "$COMMON_FILE"
+          }
+
+          get_env() {
+            yq e ".$1 // \"\"" "$ENV_FILE"
+          }
+
+          require_value() {
+            local key="$1"
+            local value="$2"
+            if [[ -z "${value// }" || "$value" == "null" || "$value" == "None" || "$value" == "none" ]]; then
+              echo "::error::Missing required configuration: $key. Please provide $key in $ENV_FILE"
+              exit 1
+            fi
+          }
+
+          IMAGE_URI="$(get_env image_uri)"
+          LAMBDA_FUNCTION_NAME="$(get_env lambda_function_name)"
+
+          require_value "image_uri" "$IMAGE_URI"
+          require_value "lambda_function_name" "$LAMBDA_FUNCTION_NAME"
+
+          {
+            echo "account_id=$(get_env aws_account)"
+            echo "region=$(get_env region)"
+            echo "project_name=$(get_common project_name)"
+            echo "image_uri=$IMAGE_URI"
+            echo "time_out=$(get_common time_out)"
+            echo "memory_size=$(get_common memory_size)"
+            echo "existing_lambda_execution_role=$(get_common existing_lambda_execution_role)"
+            echo "architectures=$(get_common architectures)"
+            echo "publish=$(get_common publish)"
+            echo "reserved_concurrent_executions=$(get_common reserved_concurrent_executions)"
+            echo "lambda_function_name=$LAMBDA_FUNCTION_NAME"
+            echo "alias_name=$(get_env alias_name)"
+            echo "alias_description=$(get_env alias_description)"
+            echo "provisioned_concurrent_executions=$(get_common provisioned_concurrent_executions)"
+            echo "ApplicationName=$(get_common ApplicationName)"
+            echo "DataClassification=$(get_common DataClassification)"
+            echo "BusinessCriticality=$(get_common BusinessCriticality)"
+            echo "BusinessUnit=$(get_common BusinessUnit)"
+            echo "CostCenter=$(get_common CostCenter)"
+          } >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: load-config
+    uses: AbuDhabiCommercialBank/adcb-reusable-workflows/.github/workflows/lambda-docker.yaml@main
+    secrets: inherit
+    with:
+      lambda_name: ${{ needs.load-config.outputs.lambda_function_name }}
+
+      account_id: ${{ needs.load-config.outputs.account_id }}
+      region: ${{ needs.load-config.outputs.region }}
+
+      project_name: ${{ needs.load-config.outputs.project_name }}
+
+      image_uri: ${{ needs.load-config.outputs.image_uri }}
+
+      time_out: ${{ needs.load-config.outputs.time_out }}
+      memory_size: ${{ needs.load-config.outputs.memory_size }}
+      existing_lambda_execution_role: ${{ needs.load-config.outputs.existing_lambda_execution_role }}
+
+      architectures: ${{ needs.load-config.outputs.architectures }}
+
+      publish: ${{ needs.load-config.outputs.publish == 'true' }}
+
+      reserved_concurrent_executions: ${{ needs.load-config.outputs.reserved_concurrent_executions }}
+
+      alias_name: ${{ needs.load-config.outputs.alias_name }}
+      alias_description: ${{ needs.load-config.outputs.alias_description }}
+
+      provisioned_concurrent_executions: ${{ needs.load-config.outputs.provisioned_concurrent_executions }}
+
+      ApplicationName: ${{ needs.load-config.outputs.ApplicationName }}
+      DataClassification: ${{ needs.load-config.outputs.DataClassification }}
+      BusinessCriticality: ${{ needs.load-config.outputs.BusinessCriticality }}
+      BusinessUnit: ${{ needs.load-config.outputs.BusinessUnit }}
+      CostCenter: ${{ needs.load-config.outputs.CostCenter }}

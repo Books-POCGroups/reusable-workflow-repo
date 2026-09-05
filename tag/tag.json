@@ -1,0 +1,12 @@
+{
+    "map-migrated": "test",
+    "ApplicationName": "Books",
+    "Environment": "uat",
+    "DataClassification": "Confidential",
+    "BusinessCriticality": "MissionCritical",
+    "BusinessUnit": "JRH-ORG",
+    "CostCenter": "XXX-XXXX",
+    "BusinessUnitOwner": "Books-JRH",
+    "RequestReference": "CHANGEREQ001",
+    "Business Continuity": "NA"
+}

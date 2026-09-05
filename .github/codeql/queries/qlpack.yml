@@ -1,0 +1,16 @@
+---
+# CodeQL pack manifest — required for CodeQL to recognize this directory
+# as a valid query pack during database init and analysis.
+# Place this file at: .github/codeql/queries/qlpack.yml
+
+name: "abudhabi-commercial-bank/java-custom-security"
+version: 0.0.1
+description: "Custom Java security queries for GHAS"
+license: "MIT"
+
+# Declare dependency on the standard Java CodeQL library
+dependencies:
+  codeql/java-all: "*"
+
+# This pack contains queries (not a library-only pack)
+library: false

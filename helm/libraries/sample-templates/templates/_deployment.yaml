@@ -1,0 +1,77 @@
+{{/*
+  This is a Helm library partial for a Deployment manifest.
+  To use in a consuming chart, call:
+    {{ include "microservice.deployment" . }}
+  This file does not render any resources by itself.
+*/}}
+{{- define "microservice.deployment" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{.Release.Name }}
+  namespace: {{.Release.Namespace }}
+  labels:
+    app: {{.Release.Name }}
+    {{- /* Allow injecting extra labels from values if needed */}}
+    {{- with.Values.global.labels }}
+    {{- toYaml. | nindent 4 }}
+    {{- end }}
+spec:
+  replicas: {{.Values.replicaCount | default 1 }}
+  selector:
+    matchLabels:
+      app: {{.Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{.Release.Name }}
+    spec:
+      affinity:
+        {{- /* Use the hardcoded anti-affinity from your snippet, or allow override */}}
+        {{- if.Values.affinity }}
+        {{- toYaml.Values.affinity | nindent 8 }}
+        {{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - {{.Release.Name }}
+                topologyKey: "kubernetes.io/hostname"
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - {{.Release.Name }}
+                topologyKey: "topology.kubernetes.io/zone"
+        {{- end }}
+      containers:
+        - name: {{.Release.Name }}
+          image: "{{.Values.image.repository }}:{{.Values.image.tag }}"
+          imagePullPolicy: {{.Values.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - containerPort: {{.Values.service.port }}
+          envFrom:
+            {{- if.Values.configMap.name }}
+            - configMapRef:
+                name: {{.Values.configMap.name }}
+            {{- end }}
+            {{- if.Values.secret.name }}
+            - secretRef:
+                name: {{.Values.secret.name }}
+            {{- end }}
+          resources:
+            requests:
+              cpu: {{.Values.resources.requests.cpu }}
+              memory: {{.Values.resources.requests.memory }}
+            limits:
+              cpu: {{.Values.resources.limits.cpu }}
+              memory: {{.Values.resources.limits.memory }}
+{{- end -}}

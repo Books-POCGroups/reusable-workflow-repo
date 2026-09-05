@@ -1,0 +1,253 @@
+name: AI Auth Service Build
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: "Domain of the service (eg: cciam, mib)"
+        type: string
+        required: true
+      type:
+        description: "Type of the application"
+        type: string
+        required: true
+        default: "springboot"
+      dockerfile_path:
+        description: "Path to Dockerfile"
+        type: string
+        required: false
+        default: "docker/Dockerfile"
+      service_name:
+        description: "Name of the service"
+        type: string
+        required: true
+      project_path:
+        description: "Path to project folder"
+        type: string
+        required: true
+      skip_env:
+        description: "Comma-separated list of environments to skip"
+        type: string
+        required: true
+      runner:
+        description: "Codebuild runner for the pipeline"
+        default: codebuild-mib2-rest-deploy-runner
+        type: string
+        required: true
+    secrets:
+      GH_PAT_TOKEN:
+        description: "GitHub Personal Access Token"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+  attestations: write
+  security-events: read
+
+jobs:
+  build-and-push:
+    name: Build, Scan & Push Docker Image - ${{ inputs.service_name }}
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Initiate Build
+        run: echo "Build started for ${{ inputs.service_name }}"
+
+      - name: Checkout workflow repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: AbuDhabiCommercialBank/mibapp-workflow-repo
+          token: ${{ secrets.GH_PAT_TOKEN }}
+          path: workflow-repo
+          ref: main
+
+      - name: Install yq
+        run: |
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.25.1/yq_linux_amd64 -o /usr/local/bin/yq
+          echo "57b6247bc2406c20a887aee3594399e081759601fd2f8ae9df21938499d76c81  /usr/local/bin/yq" | sha256sum --check
+          echo "✅ yq binary SHA256 checksum verified successfully"
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Prepare Trivy Ignore File
+        run: |
+          IGNORE_FILE="./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/.trivyignore"
+
+          mkdir -p "$(dirname "$IGNORE_FILE")"
+
+          if [ ! -f "$IGNORE_FILE" ]; then
+            touch "$IGNORE_FILE"
+            echo "Created empty .trivyignore at $IGNORE_FILE"
+          else
+            echo ".trivyignore already exists at $IGNORE_FILE"
+          fi
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5
+        with:
+          dockerfile: ${{ inputs.dockerfile_path }}
+          config: ./workflow-repo/.hadolint.yml
+
+      - name: Diagnose Docker Runtime
+        run: |
+          echo "=== docker version ==="
+          docker version || true
+
+          echo "=== docker info ==="
+          docker info || true
+
+          echo "=== which docker ==="
+          which docker
+
+          echo "=== buildx ==="
+          docker buildx version || true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+    
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@f2e9fc6c2b355c1890b65e6f6f0e2ac3e6e22f78 # v2.1.2
+
+      - name: Set ECR_REGISTRY env
+        run: |
+          echo "ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> $GITHUB_ENV
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: ${{ inputs.dockerfile_path }}
+
+          load: true
+          push: false
+
+          tags: ${{ inputs.service_name }}:${{ github.run_number }}
+
+          build-args: |
+            GH_USERNAME=${{ github.actor }}
+            GH_TOKEN=${{ secrets.GH_PAT_TOKEN }}
+            PROJECT_PATH=${{ inputs.project_path }}
+
+          #cache-from: type=gha
+          #cache-to: type=gha,mode=max
+
+      - name: Scan Docker Image
+        if: github.ref == 'refs/heads/main'
+        uses: ./workflow-repo/.github/actions/trivy
+        with:
+          scan_type: image
+          scan_ref: ${{ inputs.service_name }}:${{ github.run_number }}
+          severity: MEDIUM,HIGH,CRITICAL
+          ignore_file: ./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/.trivyignore
+
+      - name: Tag Docker Image for ECR
+        run: |
+          docker tag \
+          ${{ inputs.service_name }}:${{ github.run_number }} \
+          $ECR_REGISTRY/mib2-microservice-repo:${{ inputs.service_name }}-${{ github.run_number }}
+
+      - name: Push Docker Image to ECR
+        run: |
+          docker push \
+          $ECR_REGISTRY/mib2-microservice-repo:${{ inputs.service_name }}-${{ github.run_number }}
+
+          echo "Storing image reference into image_ref.txt"
+
+          echo "$ECR_REGISTRY/mib2-microservice-repo:${{ inputs.service_name }}-${{ github.run_number }}" > image_ref.txt
+
+      - name: Upload Service Build Reference
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: ServiceBuildRef
+          path: image_ref.txt
+          retention-days: 10
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Upload Complete Repo as artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: workflow-repo
+          path: ./workflow-repo
+          retention-days: 10
+          if-no-files-found: error
+          overwrite: true
+      - name: Write summary
+        run: |
+          {
+            echo "## Build Summary"
+            echo "**Service:** \`${{ inputs.service_name }}\`"
+            echo "**Docker Image:** \`$ECR_REGISTRY/mib2-microservice-repo:${{ inputs.service_name }}-${{ github.run_number }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-SIT:
+    needs: build-and-push
+    name: Deploy SIT
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment: sit
+      domain: ${{ inputs.domain }}
+      skip_env: ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}
+
+  validate-branch:
+    needs: deploy-SIT
+    name: Validate Branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "❌ Remaining workflow are skipped and must run only on main branch"
+          fi
+
+  deploy-UAT:
+    if: github.ref == 'refs/heads/main'
+    needs: [ deploy-SIT, validate-branch ]
+    name: Deploy UAT
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment: uat
+      domain: ${{ inputs.domain }}
+      skip_env: ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}
+
+  deploy-PREPROD:
+    if: github.ref == 'refs/heads/main'
+    needs: [ deploy-UAT ]
+    name: Deploy PREPROD
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment: preprod
+      domain: ${{ inputs.domain }}
+      skip_env: ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}
+
+  deploy-GRC-Approval:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    name: Approval for PROD
+    needs: [ deploy-PREPROD ]
+    environment: it-grc-approval
+
+    steps:
+      - name: Production deployment approval
+        run: |
+          echo "Staging for production deployment"
+
+  deploy-PROD:
+    if: github.ref == 'refs/heads/main'
+    needs: [ deploy-GRC-Approval ]
+    name: Deploy PROD
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment: prod
+      domain: ${{ inputs.domain }}
+      skip_env: ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}

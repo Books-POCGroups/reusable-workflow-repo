@@ -1,0 +1,71 @@
+name: Sync SonarQube Analysis
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: 'Name of the service to process (e.g. pn-inbox-service, AI-services/AIAuthMicroservices)'
+        type: string
+        required: true
+      branch:
+        description: 'Branch to analyze'
+        type: string
+        required: false
+        default: main
+      trigger:
+        description: 'Calling event: push | schedule'
+        type: string
+        required: true
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+      GH_PAT_TOKEN:
+        required: false
+
+# ── Concurrency is set by the caller; no top-level block here ────────────────
+# (job-level concurrency is not supported on reusable workflow jobs)
+
+jobs:
+
+  # ── push: single service, caller-supplied branch ─────────────────────────
+  sonarqube-push:
+    if: inputs.trigger == 'push'
+    uses: AbuDhabiCommercialBank/mibapp-workflow-repo/.github/workflows/pr_sonarqube.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: read
+      packages: read
+    with:
+      service: ${{ inputs.service }}
+      branch: ${{ inputs.branch }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      GH_PAT_TOKEN: ${{ secrets.GH_PAT_TOKEN }}
+
+  # ── schedule: same service, fanned out across all tracked branches ────────
+  sonarqube-schedule:
+    if: inputs.trigger == 'schedule'
+    strategy:
+      matrix:
+        branch:
+          - main
+          - feature/mibapp-dev
+          # add release branches here as needed
+      fail-fast: false
+    uses: AbuDhabiCommercialBank/mibapp-workflow-repo/.github/workflows/pr_sonarqube.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: read
+      packages: read
+    with:
+      service: ${{ inputs.service }}
+      branch: ${{ matrix.branch }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      GH_PAT_TOKEN: ${{ secrets.GH_PAT_TOKEN }}

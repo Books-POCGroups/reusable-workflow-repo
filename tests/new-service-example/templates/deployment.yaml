@@ -1,0 +1,1 @@
+{{ include "cciam-common.deployment" . | nindent 0 }}

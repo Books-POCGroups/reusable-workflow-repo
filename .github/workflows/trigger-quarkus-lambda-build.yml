@@ -1,0 +1,227 @@
+# Builds a Quarkus Lambda container image with environment-specific
+# application.properties overrides baked in (workflow-repo values/*.yaml runtime.*),
+# then pushes to the shared ECR repository. ClamAV/clamd stays in the Dockerfile.
+#
+# Image tag format: {service_name}-{environment}-{run_number}
+# Example: mib-docscan-lambda-service-preprod-42
+
+name: Quarkus Lambda Build & Push
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: "Domain of the service (eg: mib)"
+        type: string
+        required: true
+      environment:
+        description: "Target environment (sit, uat, preprod, prod)"
+        type: string
+        required: true
+      service_name:
+        description: "Service name"
+        type: string
+        required: true
+      project_path:
+        description: "Path to project folder in backend repo"
+        type: string
+        required: true
+      dockerfile_path:
+        description: "Path to Dockerfile relative to backend repo root"
+        type: string
+        required: true
+      docker_build_context:
+        description: "Docker build context relative to backend repo root"
+        type: string
+        required: false
+        default: "."
+      runner:
+        description: "CodeBuild runner label (without run-id suffix)"
+        type: string
+        required: false
+        default: codebuild-mib2-deafult-ubuntu-runner
+    secrets:
+      GH_PAT_TOKEN:
+        description: "GitHub PAT to checkout workflow-repo"
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-push:
+    name: "${{ inputs.service_name }} → ${{ inputs.environment }}"
+    runs-on: ${{ inputs.runner }}-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 120
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout application repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Checkout workflow repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: AbuDhabiCommercialBank/mibapp-workflow-repo
+          token: ${{ secrets.GH_PAT_TOKEN }}
+          path: workflow-repo
+          ref: main
+
+      - name: Install yq
+        run: |
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.25.1/yq_linux_amd64 -o /usr/local/bin/yq
+          echo "57b6247bc2406c20a887aee3594399e081759601fd2f8ae9df21938499d76c81  /usr/local/bin/yq" | sha256sum --check
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Load environment and runtime configuration
+        id: config
+        env:
+          DOMAIN: ${{ inputs.domain }}
+          SERVICE: ${{ inputs.service_name }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+
+          ENV_FILE="./workflow-repo/env/${DOMAIN}/${SERVICE}/${ENVIRONMENT}/config.yaml"
+          VALUES_FILE="./workflow-repo/values/${DOMAIN}/${SERVICE}/${ENVIRONMENT}/values.yaml"
+
+          for f in "$ENV_FILE" "$VALUES_FILE"; do
+            if [[ ! -f "$f" ]]; then
+              echo "::error::Missing config file: $f"
+              exit 1
+            fi
+          done
+
+          ECR_REPOSITORY=$(yq e '.ecr_repository' "$ENV_FILE")
+          LAMBDA_FUNCTION=$(yq e '.lambda.function_name // .lambda_function_name // ""' "$VALUES_FILE")
+          if [[ -z "$LAMBDA_FUNCTION" || "$LAMBDA_FUNCTION" == "null" ]]; then
+            LAMBDA_FUNCTION=$(yq e '.lambda_function_name // ""' "$ENV_FILE")
+          fi
+
+          IMAGE_TAG="${SERVICE}-${ENVIRONMENT}-${GITHUB_RUN_NUMBER}"
+
+          echo "env_file=$ENV_FILE" >> "$GITHUB_OUTPUT"
+          echo "values_file=$VALUES_FILE" >> "$GITHUB_OUTPUT"
+          echo "ecr_repository=$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
+          echo "lambda_function=$LAMBDA_FUNCTION" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+          echo "Loaded config for ${SERVICE} (${ENVIRONMENT})"
+          echo "Lambda function: ${LAMBDA_FUNCTION}"
+          echo "Image tag: ${IMAGE_TAG}"
+
+      - name: Prepare Docker build-args from runtime configuration
+        id: build_args
+        run: |
+          set -euo pipefail
+
+          VALUES_FILE="${{ steps.config.outputs.values_file }}"
+          BUILD_ARGS_FILE="${RUNNER_TEMP}/lambda-build-args.txt"
+
+          {
+            echo "PROJECT_PATH=${{ inputs.project_path }}"
+            echo "GH_USERNAME=${{ github.actor }}"
+            echo "GH_TOKEN=${{ secrets.GH_PAT_TOKEN }}"
+          } > "$BUILD_ARGS_FILE"
+
+          key_count=$(yq e '.runtime | keys | length' "$VALUES_FILE")
+          if [[ "$key_count" -eq 0 ]]; then
+            echo "::error::No runtime configuration found under .runtime in $VALUES_FILE"
+            exit 1
+          fi
+
+          mapfile -t RUNTIME_KEYS < <(yq e '.runtime | keys | .[]' "$VALUES_FILE")
+
+          for key in "${RUNTIME_KEYS[@]}"; do
+            val=$(yq e ".runtime.\"${key}\"" "$VALUES_FILE")
+            echo "${key}=${val}" >> "$BUILD_ARGS_FILE"
+          done
+
+          echo "build_args_file=$BUILD_ARGS_FILE" >> "$GITHUB_OUTPUT"
+
+          echo "Runtime build-args:"
+          grep -v '^GH_TOKEN=' "$BUILD_ARGS_FILE" | sed 's/^/  /'
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.1.0
+        with:
+          dockerfile: ${{ inputs.dockerfile_path }}
+          config: ./workflow-repo/.hadolint.yml
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v3.3.0
+
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@f2e9fc6c2b355c1890b65e6f6f0e2ac3e6e22f78 # v2.0.1
+
+      - name: Build Lambda container image (with runtime env)
+        id: docker_build
+        run: |
+          set -euo pipefail
+
+          LOCAL_TAG="${{ inputs.service_name }}:${{ steps.config.outputs.image_tag }}"
+          BUILD_ARGS_FILE="${{ steps.build_args.outputs.build_args_file }}"
+
+          args=()
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" ]] && continue
+            args+=(--build-arg "$line")
+          done < "$BUILD_ARGS_FILE"
+
+          docker build \
+            "${args[@]}" \
+            -f "${{ inputs.dockerfile_path }}" \
+            -t "$LOCAL_TAG" \
+            "${{ inputs.docker_build_context }}"
+
+          echo "local_tag=$LOCAL_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Tag and push image to ECR
+        id: push
+        run: |
+          set -euo pipefail
+
+          ECR_REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          ECR_REPOSITORY="${{ steps.config.outputs.ecr_repository }}"
+          IMAGE_TAG="${{ steps.config.outputs.image_tag }}"
+          LOCAL_TAG="${{ steps.docker_build.outputs.local_tag }}"
+
+          IMAGE_REF="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          docker tag "$LOCAL_TAG" "$IMAGE_REF"
+          docker push "$IMAGE_REF"
+
+          echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+          echo "ecr_registry=$ECR_REGISTRY" >> "$GITHUB_OUTPUT"
+
+          echo "Pushed: $IMAGE_REF"
+
+      - name: Write build summary
+        run: |
+          {
+            echo "## Quarkus Lambda — Build & Push"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| **Service** | \`${{ inputs.service_name }}\` |"
+            echo "| **Environment** | \`${{ inputs.environment }}\` |"
+            echo "| **Lambda function** | \`${{ steps.config.outputs.lambda_function }}\` |"
+            echo "| **Image** | \`${{ steps.push.outputs.image_ref }}\` |"
+            echo "| **Branch** | \`${{ github.ref_name }}\` |"
+            echo "| **Commit** | \`${{ github.sha }}\` |"
+            echo ""
+            echo "### application.properties overrides (baked into image)"
+            echo '```'
+            grep -v '^GH_TOKEN=' "${{ steps.build_args.outputs.build_args_file }}" | grep -v '^GH_USERNAME=' | grep -v '^PROJECT_PATH='
+            echo '```'
+            echo ""
+            echo "> Update Lambda function \`${{ steps.config.outputs.lambda_function }}\` in **${{ inputs.environment }}** to use this image URI."
+          } >> "$GITHUB_STEP_SUMMARY"

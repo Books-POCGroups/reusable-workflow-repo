@@ -1,0 +1,171 @@
+name: Helm Rollback
+run-name: Helm Rollback - ${{ inputs.environment }} - ${{ inputs.service_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        required: true
+        type: choice
+        options:
+          - books
+      environment:
+        required: true
+        type: choice
+        options:
+          - sit
+          - uat
+          - preprod
+          - prod
+      service_name:
+        required: true
+        type: choice
+        options:
+          - ai-auth-service
+      helm_version:
+        description: "Target Helm release revision to roll back to (leave empty to roll back to the previous revision)"
+        required: false
+        default: ""
+        type: string
+      runner:
+        description: "Codebuild runner for the pipeline"
+        default: codebuild-mib2-rest-deploy-runner
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  helm-rollback:
+    name: Helm Rollback - ${{ inputs.domain }}/${{ inputs.service_name }} on ${{ inputs.environment }}
+    runs-on: ${{ inputs.runner }}-${{ github.run_id }}-${{ github.run_attempt }}
+    environment: ${{ inputs.environment }}
+    env:
+      SERVICE: ${{ inputs.service_name }}
+      ENVIRONMENT: ${{ inputs.environment }}
+      CONFIG_PATH: ./workflow-repo/env/${{ inputs.domain }}/${{ inputs.service_name }}/${{ inputs.environment }}/config.yaml
+      NAMESPACE: ${{ inputs.service_name }}
+      TARGET_REVISION: ${{ inputs.helm_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: workflow-repo
+
+      - name: Get AWS caller identity first
+        run: aws sts get-caller-identity
+
+      - name: Install yq
+        run: |
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.25.1/yq_linux_amd64 -o /usr/local/bin/yq
+          echo "57b6247bc2406c20a887aee3594399e081759601fd2f8ae9df21938499d76c81  /usr/local/bin/yq" | sha256sum --check
+          echo "✅ yq binary SHA256 checksum verified successfully"
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Read Assume Role ARN from config.yaml
+        id: read-arn
+        run: |
+          echo "Config path: $CONFIG_PATH"
+          ARN=$(yq e '.arn' "$CONFIG_PATH")
+          REGION=$(yq e '.region' "$CONFIG_PATH")
+          echo "Read ARN: $ARN"
+          echo "Read REGION: $REGION"
+          echo "AWS_ASSUME_ROLE_ARN=$ARN" >> $GITHUB_ENV
+          echo "AWS_REGION=$REGION" >> $GITHUB_ENV
+
+      - name: Assume AWS Role and Export Credentials Securely
+        run: |
+          echo "Assuming role to get temporary credentials..."
+          ROLE_CREDS=$(aws sts assume-role --role-arn "$AWS_ASSUME_ROLE_ARN" --role-session-name AWSCLI-Session)
+
+          ACCESS_KEY_ID=$(echo $ROLE_CREDS | jq -r '.Credentials.AccessKeyId')
+          SECRET_ACCESS_KEY=$(echo $ROLE_CREDS | jq -r '.Credentials.SecretAccessKey')
+          SESSION_TOKEN=$(echo $ROLE_CREDS | jq -r '.Credentials.SessionToken')
+
+          echo "::add-mask::$ACCESS_KEY_ID"
+          echo "::add-mask::$SECRET_ACCESS_KEY"
+          echo "::add-mask::$SESSION_TOKEN"
+
+          echo "AWS_ACCESS_KEY_ID=$ACCESS_KEY_ID" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=$SECRET_ACCESS_KEY" >> $GITHUB_ENV
+          echo "AWS_SESSION_TOKEN=$SESSION_TOKEN" >> $GITHUB_ENV
+
+      - name: Setup kubectl
+        run: |
+          echo "Updating up kubectl..."
+          CLUSTER_NAME=$(yq e '.cluster_name' "$CONFIG_PATH")
+          echo "Connect with EKS cluster: $CLUSTER_NAME"
+          aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+
+      - name: Setup Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v3.12.1
+
+      - name: Resolve target Helm revision
+        id: resolve-revision
+        run: |
+          echo "Fetching Helm history for release: $SERVICE in namespace: $NAMESPACE"
+          helm history "$SERVICE" --namespace "$NAMESPACE" --max 20 --output json > /tmp/helm-history.json
+
+          echo "---- Helm History ----"
+          helm history "$SERVICE" --namespace "$NAMESPACE" --max 20
+          echo "----------------------"
+
+          CURRENT_REVISION=$(jq '[.[] | select(.status == "deployed")] | last | .revision' /tmp/helm-history.json)
+          echo "Current deployed revision: $CURRENT_REVISION"
+
+          if [ -z "$TARGET_REVISION" ] || [ "$TARGET_REVISION" = "0" ]; then
+            # No version provided — roll back to the last deployed revision before current
+            ROLLBACK_REVISION=$(jq --argjson cur "$CURRENT_REVISION" \
+              '[.[] | select(.status == "superseded" and .revision < $cur)] | last | .revision' \
+              /tmp/helm-history.json)
+
+            if [ -z "$ROLLBACK_REVISION" ] || [ "$ROLLBACK_REVISION" = "null" ]; then
+              echo "❌ No previous superseded revision found to roll back to."
+              exit 1
+            fi
+
+            echo "No target revision specified. Rolling back to previous revision: $ROLLBACK_REVISION"
+          else
+            # Target revision provided — validate it exists in history
+            REVISION_EXISTS=$(jq --argjson rev "$TARGET_REVISION" \
+              '[.[] | select(.revision == $rev)] | length' \
+              /tmp/helm-history.json)
+
+            if [ "$REVISION_EXISTS" -eq 0 ]; then
+              echo "❌ Revision $TARGET_REVISION does not exist in Helm history for release $SERVICE."
+              exit 1
+            fi
+
+            if [ "$TARGET_REVISION" = "$CURRENT_REVISION" ]; then
+              echo "⚠️ Target revision $TARGET_REVISION is already the currently deployed revision. No rollback needed."
+              exit 0
+            fi
+
+            ROLLBACK_REVISION="$TARGET_REVISION"
+            echo "Target revision $TARGET_REVISION found in history. Rolling back to: $ROLLBACK_REVISION"
+          fi
+
+          echo "ROLLBACK_REVISION=$ROLLBACK_REVISION" >> $GITHUB_ENV
+
+      - name: Perform Helm Rollback
+        run: |
+          echo "Rolling back $SERVICE in namespace $NAMESPACE to revision $ROLLBACK_REVISION..."
+          helm rollback "$SERVICE" "$ROLLBACK_REVISION" --namespace "$NAMESPACE" --wait --timeout 5m
+
+          echo "✅ Helm rollback to revision $ROLLBACK_REVISION completed successfully."
+
+      - name: Verify rollback
+        run: |
+          echo "---- Post-rollback Helm status ----"
+          helm status "$SERVICE" --namespace "$NAMESPACE"
+          echo "---- Post-rollback History ----"
+          helm history "$SERVICE" --namespace "$NAMESPACE" --max 5
+          echo "---- Deployment rollout status ----"
+          kubectl rollout status deployment/"$SERVICE" --namespace "$NAMESPACE" --timeout=3m

@@ -1,0 +1,19 @@
+{{/*
+  This is a Helm library partial for a ConfigMap manifest.
+  To use in a consuming chart, call:
+    {{ include "microservice.configmap" . }}
+  This file does not render any resources by itself.
+*/}}
+{{- define "microservice.configmap" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ required "configMap.name is required" .Values.configMap.name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: {{ $.Release.Name }}
+data:
+{{- range $key, $value := .Values.configMap.data }}
+  {{ $key }}: "{{ $value }}"
+{{- end }}
+{{- end }}

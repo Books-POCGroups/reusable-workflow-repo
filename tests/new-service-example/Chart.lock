@@ -1,0 +1,6 @@
+dependencies:
+- name: cciam-ms-library
+  repository: file://../helm-microservice-library/cciam
+  version: 1.0.0
+digest: sha256:6147d3c6bb5a86670648bb5549017bd2ee89690a7b9da8c6a47c2d601f2d42c0
+generated: "2025-12-22T12:19:26.650737+04:00"

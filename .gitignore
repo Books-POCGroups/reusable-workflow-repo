@@ -1,0 +1,21 @@
+.repomixignore
+repomix.config.json
+secrets-template.yml
+*repomix*
+# Helm ignore files
+*.tgz                   # Ignore packaged chart archives (created by 'helm package')
+*.tgz.prov              # Ignore provenance files (if generated)
+.helmignore             # While .helmignore itself is useful, you might choose to ignore it from git if it's auto-generated or personal
+
+# IDE/OS files
+.idea/                  # Common for IntelliJ/GoLand IDE files
+.vscode/                # Common for VS Code IDE files
+.DS_Store               # macOS specific files
+Thumbs.db               # Windows specific files
+temp/                   # Temporary files/directories
+target/                 # Build output directories
+
+# Specific application build artifacts
+/bin                    # Binary output directory
+
+*.log

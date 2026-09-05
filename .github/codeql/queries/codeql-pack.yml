@@ -1,0 +1,5 @@
+name: custom-java-queries
+version: 1.0.0
+dependencies:
+  codeql/java-all: '*'
+library: false

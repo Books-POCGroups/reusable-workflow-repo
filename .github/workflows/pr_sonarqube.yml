@@ -1,0 +1,234 @@
+name: PR – SonarQube Quality Gate
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Service to scan"
+        required: true
+        type: string
+      branch:
+        description: "Branch to scan"
+        required: false
+        type: string
+      type:
+        description: "Type of the application"
+        required: true
+        type: string
+        default: "springboot"
+      
+
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+      GH_PAT_TOKEN:
+        required: true
+
+    outputs:
+      result:
+        description: "Overall Sonar result: success|failure"
+        value: ${{ jobs.sonarqube-gate.outputs.result }}
+      qg_status:
+        description: "Quality gate status"
+        value: ${{ jobs.sonarqube-gate.outputs.qg_status }}
+      sonar_details:
+        description: "Compact JSON string with PR measures"
+        value: ${{ jobs.sonarqube-gate.outputs.sonar_details }}
+
+jobs:
+  sonarqube-gate:
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    outputs:
+      result: ${{ steps.setoutput.outputs.result }}
+      qg_status: ${{ steps.setoutput.outputs.qg_status }}
+      sonar_details: ${{ steps.setoutput.outputs.sonar_details }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch || github.head_ref || github.ref_name }}
+          fetch-depth: 0
+      
+      - name: Select Sonar properties file by service type
+        run: |
+          SERVICE="${{ inputs.service }}"
+          TYPE="${{ inputs.type }}"
+
+          if [[ "$TYPE" == "quarkus" ]]; then
+            mv "./sonar-quarkus-project.properties" "./sonar-project.properties"
+          else
+            mv "./sonar-springboot-project.properties" "./sonar-project.properties"
+          fi
+
+          echo "Using sonar-project.properties for $SERVICE (type: $TYPE)"
+
+      - name: Copy sonar-project.properties into service folder
+        run: |
+          cp ./sonar-project.properties ./${{ inputs.service }}/sonar-project.properties
+          echo "Copied to ./${{ inputs.service }}/sonar-project.properties"
+
+      - name: List service files
+        run: ls -la ./${{ inputs.service }}
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: "21"
+
+      - name: Cache Sonar
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar-${{ inputs.service }}
+          restore-keys: ${{ runner.os }}-sonar-
+
+      - name: Install jq
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            microdnf install -y jq || apt-get install -y jq || true
+          fi
+
+      - name: Run Tests & Generate Coverage
+        working-directory: ${{ inputs.service }}
+        env:
+          GH_USERNAME: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GH_PAT_TOKEN }}
+        run: |
+          gradle clean build jacocoTestReport \
+            --no-daemon --stacktrace --continue
+        continue-on-error: true
+
+      - name: Get SonarQube project key
+        id: project_key
+        run: |
+          SERVICE="${{ inputs.service }}"
+          PROJECT_NAME="${SERVICE##*/}"
+          PROJECT_KEY=$(echo "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]')
+          echo "project_key=$PROJECT_KEY" >> "$GITHUB_OUTPUT"
+          echo "Derived project key: mob-$PROJECT_KEY"
+      
+      - name: SonarQube Scan
+        uses: sonarsource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          projectBaseDir: ${{ inputs.service }}
+          args: >
+            -Dsonar.ci.autoconfig.disabled=true
+            -Dsonar.projectKey=mob-${{ steps.project_key.outputs.project_key }}
+            -Dsonar.projectName=MIB2.0-${{ steps.project_key.outputs.project_key }}
+            ${{ github.event_name == 'pull_request' &&
+              format('-Dsonar.pullrequest.key={0} -Dsonar.pullrequest.branch={1} -Dsonar.pullrequest.base={2}',
+                github.event.number,
+                github.head_ref,
+                github.base_ref
+              ) || '' }}
+
+      - name: SonarQube Quality Gate check
+        id: sonarqube-quality-gate-check
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        continue-on-error: true
+        with:
+          pollingTimeoutSec: 600
+          scanMetadataReportFile: ${{ inputs.service }}/.scannerwork/report-task.txt
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+      - name: Fetch Sonar Status
+        id: fetch_qg_status
+        if: always()
+        shell: bash
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          set -euo pipefail
+
+          PR_KEY="${{ github.event.number || '' }}"
+          PROJECT_KEY="mob-${{ steps.project_key.outputs.project_key }}"
+
+          if [ -n "$PR_KEY" ]; then
+            echo "Fetching PR Quality Gate for $PROJECT_KEY PR#$PR_KEY"
+
+            RESPONSE=$(curl -s -u "$SONAR_TOKEN:" \
+              "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY&pullRequest=$PR_KEY")
+
+            echo "Sonar API response: $RESPONSE"
+
+            STATUS=$(echo "$RESPONSE" | jq -r '.projectStatus.status // "UNKNOWN"')
+            echo "Quality gate status: $STATUS"
+            echo "qg_status=$STATUS" >> "$GITHUB_OUTPUT"
+
+            # ── NEW: capture conditions for artifact ───────────────────────
+            CONDITIONS=$(echo "$RESPONSE" | jq -c '.projectStatus.conditions // []')
+            echo "qg_conditions=$CONDITIONS" >> "$GITHUB_OUTPUT"
+          else
+            echo "Non-PR run → skipping PR-specific API"
+            echo "qg_status=UNKNOWN"  >> "$GITHUB_OUTPUT"
+            echo "qg_conditions=[]"   >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "sonar_details=NA" >> "$GITHUB_OUTPUT"
+
+      - name: Set outputs
+        id: setoutput
+        if: always()
+        run: |
+          QG_STATUS="${{ steps.fetch_qg_status.outputs.qg_status }}"
+          echo "Final quality gate status: $QG_STATUS"
+
+          if [[ "$QG_STATUS" =~ ^(ERROR|FAILED|FAIL)$ ]]; then
+            echo "result=failure" >> $GITHUB_OUTPUT
+            echo "::error::SonarQube Quality Gate FAILED for ${{ inputs.service }} (status: $QG_STATUS)"
+          else
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "✅ SonarQube Quality Gate passed (status: $QG_STATUS)"
+          fi
+
+          echo "qg_status=$QG_STATUS" >> $GITHUB_OUTPUT
+          echo "sonar_details=${{ steps.fetch_qg_status.outputs.sonar_details }}" >> $GITHUB_OUTPUT
+
+      # ── NEW: write artifact with status + conditions ───────────────────────
+      - name: Write QG result to artifact
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p /tmp/sonar-results
+          SERVICE_SLUG=$(echo "${{ inputs.service }}" | tr '/' '-')
+
+          QG_STATUS="${{ steps.fetch_qg_status.outputs.qg_status }}"
+
+          CONDITIONS='${{ steps.fetch_qg_status.outputs.qg_conditions }}'
+          if [[ -z "$CONDITIONS" || "$CONDITIONS" == "null" ]]; then
+            CONDITIONS="[]"
+          fi
+
+          jq -n \
+            --arg  service      "${{ inputs.service }}" \
+            --arg  status       "$QG_STATUS" \
+            --argjson conditions "$CONDITIONS" \
+            '{service: $service, status: $status, conditions: $conditions}' \
+            > "/tmp/sonar-results/${SERVICE_SLUG}.json"
+
+          echo "Written artifact:"
+          cat "/tmp/sonar-results/${SERVICE_SLUG}.json"
+
+      # ── NEW: upload artifact for caller workflow to consume ────────────────
+      - name: Upload QG result artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonar-qg-${{ strategy.job-index }}
+          path: /tmp/sonar-results/
+          retention-days: 1

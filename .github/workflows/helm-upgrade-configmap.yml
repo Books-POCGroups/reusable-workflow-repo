@@ -1,0 +1,178 @@
+name: Upgrade ConfigMap in Kubernetes
+run-name: Upgrade ConfigMap for ${{ inputs.environment }} - ${{ inputs.service_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment Environment (e.g., dev, staging, prod)'
+        required: true
+        type: string
+      service_name:
+        description: 'Service Name'
+        required: true
+        type: string
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+jobs:
+  upgrade-configmap:
+    name: Upgrade ConfigMap for ${{ inputs.service_name }} in ${{ inputs.environment }}
+    runs-on: codebuild-mib-rest-services-build-${{ github.run_id }}-${{ github.run_attempt }}
+    environment: ${{inputs.environment}}
+    env:
+      SERVICE: ${{ inputs.service_name }}
+      ENVIRONMENT: ${{ inputs.environment }}
+      VALUES_FILE: ./workflow-repo/values/${{ inputs.service_name }}/${{ inputs.environment }}/service/values.yaml
+      CONFIG_PATH: ./workflow-repo/env/${{ inputs.service_name }}/${{ inputs.environment }}/config.yaml
+      NAMESPACE: ${{ inputs.service_name }}
+    steps:
+      - name: Download Complete Repository Artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: workflow-repo
+          path: ./workflow-repo
+
+      - name: Install yq
+        run: |
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.25.1/yq_linux_amd64 -o /usr/local/bin/yq
+          echo "57b6247bc2406c20a887aee3594399e081759601fd2f8ae9df21938499d76c81  /usr/local/bin/yq" | sha256sum --check
+          echo "✅ yq binary SHA256 checksum verified successfully"
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Auto-replace placeholders + Secrets Manager (Safe Mode)
+        shell: bash
+        run: |
+          echo "Starting placeholder resolution"
+          echo "Values file: $VALUES_FILE"
+          echo "Service: $SERVICE"
+          echo "----------------------------------------"
+
+          INVALID_VALUES=("None" "none" "null" "NULL" "" "{}" " ")
+
+          check_invalid() {
+            local v="$(echo "$1" | xargs || true)"
+            [[ -z "$v" ]] && return 1
+            for bad in "${INVALID_VALUES[@]}"; do
+              [[ "$v" == "$bad" ]] && return 1
+            done
+            return 0
+          }
+
+          KEYS=$(yq e '.. | select(tag=="!!str" and test("^<<.*>>$")) | path | .[-1]' "$VALUES_FILE")
+          echo "Detected keys: $KEYS"
+          echo "----------------------------------------"
+
+          SECRET_ARNS=$(aws secretsmanager list-secrets \
+            --query "SecretList[?starts_with(Name, '$SERVICE')].ARN" \
+            --output text 2>/dev/null || true)
+          declare -A SECRET_JSONS
+          for arn in $SECRET_ARNS; do
+            JSON=$(aws secretsmanager get-secret-value --secret-id "$arn" \
+              --query "SecretString" --output text 2>/dev/null || true)
+            SECRET_JSONS["$arn"]="$JSON"
+          done
+
+          for key in $KEYS; do
+            echo "Resolving key: $key"
+            VALUE=""
+
+            # Read from ssm-config YAML file for the service and environment
+            SSM_CONFIG_FILE="./workflow-repo/ssm-config/${SERVICE}/${ENVIRONMENT}/config.yml"
+            if [ -f "$SSM_CONFIG_FILE" ]; then
+              SSM_VALUE=$(yq e ".$key" "$SSM_CONFIG_FILE" | xargs || true)
+              if check_invalid "$SSM_VALUE"; then
+                VALUE="$SSM_VALUE"
+                echo "✔ Loaded from ssm-config: $SSM_CONFIG_FILE ($key)"
+              fi
+            fi
+            echo "Value after ssm-config check: '$VALUE'"
+
+            if [[ -z "$VALUE" ]]; then
+              DIRECT_SECRET="${SERVICE}_$key"
+              RAW_SECRET=$(aws secretsmanager get-secret-value --secret-id "$DIRECT_SECRET" \
+                --query "SecretString" --output text 2>/dev/null || true)
+              RAW_SECRET=$(echo "$RAW_SECRET" | xargs || true)
+              echo "Raw secret: '$RAW_SECRET'"
+
+              if check_invalid "$RAW_SECRET"; then
+                if echo "$RAW_SECRET" | jq -e . >/dev/null 2>&1; then
+                  if echo "$RAW_SECRET" | jq 'has("data")' | grep -q true 2>/dev/null; then
+                    NESTED=$(echo "$RAW_SECRET" | jq -r --arg k "$key" '.data[$k] // empty')
+                  else
+                    NESTED=$(echo "$RAW_SECRET" | jq -r --arg k "$key" '.[$k] // empty')
+                  fi
+                  [[ $(check_invalid "$NESTED"; echo $?) -eq 0 ]] && VALUE="$NESTED" && echo "✔ Loaded from SecretsManager JSON: $DIRECT_SECRET"
+                else
+                  VALUE="$RAW_SECRET"
+                  echo "✔ Loaded from SecretsManager string: $DIRECT_SECRET"
+                fi
+              fi
+            fi
+
+            if [[ -z "$VALUE" ]]; then
+              for arn in "${!SECRET_JSONS[@]}"; do
+                JSON="${SECRET_JSONS[$arn]}"
+                [[ ! $(check_invalid "$JSON"; echo $?) -eq 0 ]] && continue
+                if echo "$JSON" | jq -e . >/dev/null 2>&1; then
+                  if echo "$JSON" | jq 'has("data")' | grep -q true 2>/dev/null; then
+                    FOUND=$(echo "$JSON" | jq -r --arg k "$key" '.data[$k] // empty')
+                  else
+                    FOUND=$(echo "$JSON" | jq -r --arg k "$key" '.[$k] // empty')
+                  fi
+                  [[ $(check_invalid "$FOUND"; echo $?) -eq 0 ]] && VALUE="$FOUND" && echo "✔ Loaded from fallback secret: $arn" && break
+                fi
+              done
+            fi
+
+            [[ -z "$VALUE" ]] && { echo "⚠ No value found for key: $key"; continue; }
+
+            sed -i "s|<<$key>>|$VALUE|g" "$VALUES_FILE"
+            echo "✔ Replaced <<$key>>"
+          done
+
+          echo "----------------------------------------"
+          echo "Final values.yaml content:"
+          cat "$VALUES_FILE"
+
+      - name: Setup kubectl & configure namespace
+        run: |
+          CLUSTER_NAME=$(yq e '.cluster_name' "$CONFIG_PATH")
+          echo "Connect with EKS cluster : $CLUSTER_NAME"
+          aws eks update-kubeconfig --region me-central-1 --name $CLUSTER_NAME
+          if ! kubectl get ns ${{ inputs.service_name }} >/dev/null 2>&1; then
+            echo "Namespace ${{ inputs.service_name }} does not exist. Failing pipeline."
+            exit 1
+          fi
+
+      - name: Helm upgrade configmap only if exists
+        run: |
+            CHART_PATH="./workflow-repo/helm/${{ inputs.service_name }}/service"
+            VALUES_FILE="./workflow-repo/values/${{ inputs.service_name }}/${{ inputs.environment }}/service/values.yaml"
+            
+            if [ -f "$CHART_PATH" ]; then
+                echo "Chart path template exists: $CHART_PATH"
+
+                # Create temp chart
+                TMP_CHART="./tmp-chart"
+                mkdir -p "$TMP_CHART/templates"
+
+                # Copy only essentials
+                cp "$CHART_PATH/Chart.yaml" "$TMP_CHART/Chart.yaml"
+                cp "$VALUES_FILE" "$TMP_CHART/values.yaml"
+                cp "$CHART_PATH/templates/configmap.yaml" "$TMP_CHART/templates/"
+
+                echo "Temporary chart built at $TMP_CHART with only the ConfigMap"
+                helm upgrade --install ${{ inputs.service_name }} "$TMP_CHART" \
+                    --values "$TMP_CHART/values.yaml" \
+                    --reuse-values \
+                    --namespace ${{ inputs.service_name }}
+                
+                    echo "Helm upgrade for ConfigMap completed."
+                # Run Helm upgrade using the minimal chart
+
+            else
+                echo "No chart found for ${{ inputs.service_name }}. Skipping Helm upgrade."
+            fi

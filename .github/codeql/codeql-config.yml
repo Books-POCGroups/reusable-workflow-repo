@@ -1,0 +1,25 @@
+name: "Java Full-Coverage CodeQL Config"
+ 
+disable-default-queries: false
+ 
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+  - uses: ./workflow-repo/.github/codeql/queries
+ 
+paths:
+  - src/main/java
+  - src/main/resources
+ 
+paths-ignore:
+  - src/test
+  - src/it
+  - vendor
+  - target
+  - build
+  - "**/*Test.java"
+  - "**/*Spec.java"
+  - "**/*Mock*.java"
+  - "**/*Stub*.java"
+  - "**/*Fixture*.java"
+  - "**/*.min.js"

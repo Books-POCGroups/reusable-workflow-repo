@@ -1,0 +1,89 @@
+{{/*
+  This is a Helm library partial for a Deployment manifest.
+  To use in a consuming chart, call:
+    {{ include "mib-common.deployment" . }}
+  This file does not render any resources by itself.
+*/}}
+{{- define "mib-common.deployment" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      {{- if and .Values.serviceaccount (hasKey .Values.serviceaccount "name") (not (eq .Values.serviceaccount.name nil)) }}
+      serviceAccountName: {{ .Values.serviceaccount.name }}
+      {{- end }}
+      tolerations:
+        - key: "cluster"
+          operator: "Equal"
+          value: "mib"
+          effect: "NoSchedule"
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - {{ .Release.Name }}
+                topologyKey: "kubernetes.io/hostname"
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - {{ .Release.Name }}
+                topologyKey: "topology.kubernetes.io/zone"
+       # Truststore Secret Volume
+      volumes:
+        - name: truststore-volume
+          secret:
+            secretName: {{ .Release.Name }}-truststore
+
+      containers:
+        - name: {{ .Release.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # securityContext:
+          #   capabilities:
+          #     add: ["NET_BIND_SERVICE"]
+          #     drop: ["ALL"]
+          #   allowPrivilegeEscalation: false
+          ports:
+            - containerPort: {{ .Values.service.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.configMap.name }}
+            - secretRef:
+                name: {{ .Values.secret.name }}
+           # Mount JVM Truststore
+          volumeMounts:
+            - name: truststore-volume
+              mountPath: {{ .Values.truststore.javaHome }}/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu }}
+              memory: {{ .Values.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu }}
+              memory: {{ .Values.resources.limits.memory }}
+{{- end -}}

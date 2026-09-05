@@ -1,0 +1,10 @@
+apiVersion: v2
+name: books-mgmt-service
+description: Helm chart for Books service
+type: application
+version: 1.0.0
+
+dependencies:
+  - name: books-common
+    version: 1.0.0
+    repository: "file://../../../libraries/books-common"

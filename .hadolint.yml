@@ -1,0 +1,10 @@
+# workflow-repo/.hadolint.yaml
+trustedRegistries:
+  - 229410149234.dkr.ecr.eu-west-1.amazonaws.com
+
+failure-threshold: error
+
+ignored:
+  - DL3007   # allow :latest on YOUR trusted images
+  - DL3033   # allow yum without version pinning
+  - DL4006   # allow pipe without pipefail

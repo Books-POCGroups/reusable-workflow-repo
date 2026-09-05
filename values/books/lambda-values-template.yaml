@@ -1,0 +1,23 @@
+# Template for Quarkus Lambda services (no Helm / Kubernetes).
+# Copy to values/mib/<service-name>/<environment>/values.yaml
+#
+# runtime.* → Docker build-args → ENV (application.properties placeholders only).
+# Do NOT add CLAMAV_* or clamd settings here — those belong in the Dockerfile.
+
+lambda:
+  function_name: CHANGE_ME-lambda
+
+image:
+  repository: 229410149234.dkr.ecr.eu-west-1.amazonaws.com/mib2-microservice-repo
+
+runtime:
+  AWS_REGION: eu-west-1
+  APP_CLEAN_BUCKET: CHANGE_ME-clean-bucket
+  APP_QUARANTINE_BUCKET: CHANGE_ME-quarantine-bucket
+  APP_STATUS_QUEUE_URL: https://sqs.eu-west-1.amazonaws.com/ACCOUNT_ID/CHANGE_ME-queue
+  APP_STATUS_QUEUE_NAME: CHANGE_ME-queue
+  APP_DELETE_SOURCE_AFTER_ROUTE: "false"
+  APP_ROUTE_SCAN_FAILURE_TO_INFECTED: "false"
+  APP_IMAGE_THUMBNAIL_PREFIX: thumbnail
+  APP_IMAGE_THUMBNAIL_MAX_DIMENSION: "320"
+  APP_IMAGE_THUMBNAIL_JPEG_QUALITY: "0.75"

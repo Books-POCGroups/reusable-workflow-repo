@@ -1,0 +1,11 @@
+apiVersion: v2
+name: my-spring-app
+description: A Spring Boot application using the MIB AI library
+version: 0.1.0
+appVersion: "1.0.0"
+
+dependencies:
+  - name: cciam-common
+    version: 1.0.0
+    # Use "file://" for local dev, or a URL for a remote repo
+    repository: "file://../../helm/libraries/cciam"

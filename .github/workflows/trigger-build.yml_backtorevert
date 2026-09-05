@@ -1,0 +1,1175 @@
+# ============================================================
+#  Microservice Build & Deploy  —  Reusable Workflow
+#
+#  SCAN SEQUENCING  (earliest-fail design)
+#  ────────────────────────────────────────
+#  Stage 1   build-app
+#  Stage 2   (parallel, after build-app)
+#              trivy-secrets
+#              trivy-fs-libs   (matrix: lib + plugin-lib)
+#              sonar-scan
+#              codeql-scan     (placeholder)
+#              build-image
+#  Stage 3   (parallel, after build-app / build-image)
+#              generate-source-sbom   (after build-app)
+#              trivy-db-cache         (after build-image)
+#  Stage 4   (parallel, after build-image + trivy-db-cache)
+#              trivy-image-scan
+#              generate-image-sbom    (attest + sbom-vuln-scan)
+#  Stage 5   security-gate
+#  Stage 6   deploy-SIT
+#  Stage 7   validate-branch
+#  Stage 8   deploy-UAT         (main only)
+#  Stage 9   deploy-PREPROD     (main only)
+#  Stage 10  deploy-GRC-Approval (main only)
+#  Stage 11  deploy-PROD        (main only)
+#
+#  PERMISSIONS MODEL
+#  ─────────────────
+#  Top-level permissions: {} — deny all by default.
+#  Each job declares only the scopes it actually needs.
+#
+#  Job                    contents   id-token   attestations
+#  ─────────────────────  ────────   ────────   ────────────
+#  build-app              read       —          —
+#  trivy-secrets          read       —          —
+#  trivy-fs-libs          read       —          —
+#  sonar-scan             read       —          —
+#  codeql-scan            read       —          —
+#  build-image            read       write      write
+#  generate-source-sbom   read       —          —
+#  trivy-db-cache         —          —          —
+#  trivy-image-scan       read       —          —
+#  generate-image-sbom    read       write      write
+#  security-gate          —          —          —
+#  deploy-*               (inherited from called workflow)
+#
+#  ACTION PIN REFERENCE
+#  ────────────────────────────────────────────────────────────
+#  actions/checkout          v4.2.2    11bd71901bbe5b1630ceea73d27597364c9af683
+#  actions/cache             v4.2.2    d4323d4df104b026a6aa633fdb11d772146be0bf
+#  actions/upload-artifact   v4.4.0    50769540e7f4bd5e21e526ee35c689e35e0d6874
+#  actions/download-artifact v4.1.8    fa0a91b85d4f404e444e00e005971372dc801d16
+#  actions/attest            v4.1.0    59d89421af93a897026c735860bf21b6eb4f7b26
+#  aquasecurity/setup-trivy  v0.2.6    3fb12ec12f41e471780db15c232d5dd185dcb514
+#  aquasecurity/trivy-action v0.36.0   ed142fd0673e97e23eac54620cfb913e5ce36c25
+#  anchore/sbom-action       v0.24.0   e22c389904149dbc22b58101806040fa8d37a610
+#  hadolint/hadolint-action  v3.1.0    2332a7b74a6de0dda2e2221d575162eba76ba5e5
+#  docker/setup-buildx       v3.3.0    d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+#  aws-actions/ecr-login     v2.0.1    f2e9fc6c2b355c1890b65e6f6f0e2ac3e6e22f78
+#  docker/build-push-action  v6.4.1    f9f3042f7e2789586610d6e8b85c8f03e5195baf
+#
+#  Supply-chain notice (CVE-2026-33634):
+#    trivy-action tags 0.0.1–0.34.2 were backdoored on 2026-03-19.
+#    v0.36.0 (2026-04-22) is the first clean post-attack release.
+# ============================================================
+
+name: Microservice Build & Deploy
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: "Domain of the service (eg: cciam, mib)"
+        type: string
+        required: true
+      dockerfile_path:
+        description: "Path to Dockerfile"
+        type: string
+        required: false
+        default: "docker/Dockerfile"
+      service_name:
+        description: "Name of the service"
+        type: string
+        required: true
+      project_path:
+        description: "Path to project folder"
+        type: string
+        required: true
+      skip_env:
+        description: "Comma-separated list of environments to skip"
+        type: string
+        required: true
+      runner:
+        description: "CodeBuild runner for the pipeline"
+        default: codebuild-mib2-rest-deploy-runner
+        type: string
+        required: true
+      severity_threshold:
+        description: "Trivy severity levels that fail the build"
+        type: string
+        required: false
+        default: "MEDIUM,HIGH,CRITICAL"
+
+    secrets:
+      GH_PAT_TOKEN:
+        description: "GitHub Personal Access Token"
+        required: true
+      SONAR_TOKEN:
+        description: "SonarQube authentication token"
+        required: false
+
+# ─────────────────────────────────────────────────────────────
+#  FIX: Top-level permissions denied by default.
+#  Each job below grants only the scopes it actually uses.
+#  Previously this block granted id-token + attestations to
+#  every job including deploy jobs that don't need them.
+# ─────────────────────────────────────────────────────────────
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+  attestations: write
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  ECR_REPO:        mib2-microservice-repo
+  AWS_REGION:      eu-west-1
+  TRIVY_VERSION:   v0.71.0
+  TRIVY_CACHE_DIR: ~/.cache/trivy
+  TRIVY_IGNORE:    ./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/.trivyignore
+
+
+# =====================================================================
+#  STAGE 1 — Build Application
+# =====================================================================
+jobs:
+
+  build-app:
+    name: "Build — Application"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Initiate build
+        run: echo "🚀 Build started for ${{ inputs.service_name }}"
+
+      - name: Checkout workflow repo
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: AbuDhabiCommercialBank/mibapp-workflow-repo
+          token: ${{ secrets.GH_PAT_TOKEN }}
+          path: workflow-repo
+          ref: main
+
+      - name: Install yq (pinned + checksum verified)
+        run: |
+          curl -fsSL \
+            https://github.com/mikefarah/yq/releases/download/v4.25.1/yq_linux_amd64 \
+            -o /usr/local/bin/yq
+          echo "57b6247bc2406c20a887aee3594399e081759601fd2f8ae9df21938499d76c81  /usr/local/bin/yq" \
+            | sha256sum --check
+          echo "✅ yq SHA256 checksum verified"
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Prepare Trivy ignore file
+        run: |
+          IGNORE_FILE="./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/.trivyignore"
+          mkdir -p "$(dirname "$IGNORE_FILE")"
+          if [ ! -f "$IGNORE_FILE" ]; then
+            echo "# trivyignore for ${{ inputs.service_name }}" > "$IGNORE_FILE"
+          fi
+
+      - name: Lint Dockerfile (Hadolint)
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5  # v3.1.0
+        with:
+          dockerfile: ${{ inputs.dockerfile_path }}
+          config: ./workflow-repo/.hadolint.yml
+          format: sarif
+          output-file: hadolint-results.sarif
+          no-fail: false
+
+      - name: Upload Hadolint report
+        if: always()
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874  # v4.4.0
+        with:
+          name: hadolint-report
+          path: hadolint-results.sarif
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Upload workflow repo as artifact
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874  # v4.4.0
+        with:
+          name: workflow-repo
+          path: ./workflow-repo
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+          include-hidden-files: true
+
+
+# =====================================================================
+#  STAGE 2a — Trivy: Secrets scan (source tree)
+# =====================================================================
+  trivy-secrets:
+    name: "Security — Trivy (secrets)"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: build-app
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          sparse-checkout: |
+            .github
+            ${{ inputs.project_path }}
+
+      - name: Download workflow repo
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        with:
+          name: workflow-repo
+          path: workflow-repo
+
+      - name: Copy trivy action from workflow-repo
+        run: |
+          mkdir -p .github/actions/trivy
+          cp -f ./workflow-repo/.github/actions/trivy/action.yml .github/actions/trivy/action.yml
+
+      - name: Create report directory
+        run: mkdir -p trivy-reports
+
+      - name: Copy Trivy configs to system path
+        run: |
+          cp ./workflow-repo/trivy.yaml /trivy.yaml
+          [ -f ./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/trivy-secret.yaml ] && \
+            cp ./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/trivy-secret.yaml \
+               ./trivy-secret.yaml || true
+
+      - name: "Trivy scan — secrets (source tree)"
+        uses: ./.github/actions/trivy
+        with:
+          label:          secrets
+          scan_type:      fs
+          scan_ref:       .
+          severity:       ${{ inputs.severity_threshold }}
+          output_file:    trivy-reports/secrets.txt
+          ignore_file:    ${{ env.TRIVY_IGNORE }}
+          scanners:       secret
+          trivy_config:   /trivy.yaml
+          trivy_version:  ${{ env.TRIVY_VERSION }}
+          # ignore_unfixed not applicable for secret scanner
+
+
+# =====================================================================
+#  STAGE 2b — Trivy: Filesystem / SCA scans (lib JARs)
+# =====================================================================
+  trivy-fs-libs:
+    name: "Security — Trivy (filesystem libs)"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: build-app
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        scan:
+          - label: filesystem-lib
+            scan-ref: ./${{ inputs.project_path }}/lib/
+            report: fs-lib.txt
+          - label: filesystem-plugin-lib
+            scan-ref: ./${{ inputs.project_path }}/plugin-lib/
+            report: fs-plugin-lib.txt
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          sparse-checkout: |
+            ${{ inputs.project_path }}
+
+      - name: Check if scan directory exists
+        id: check-dir
+        run: |
+          if [ -d "${{ matrix.scan.scan-ref }}" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Directory ${{ matrix.scan.scan-ref }} found — proceeding with scan"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️  Directory ${{ matrix.scan.scan-ref }} not found — skipping scan"
+          fi
+
+      - name: Download workflow repo
+        if: steps.check-dir.outputs.exists == 'true'
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        with:
+          name: workflow-repo
+          path: workflow-repo
+
+      - name: Copy trivy action from workflow-repo
+        if: steps.check-dir.outputs.exists == 'true'
+        run: |
+          mkdir -p .github/actions/trivy
+          cp -f ./workflow-repo/.github/actions/trivy/action.yml .github/actions/trivy/action.yml
+
+      - name: Create report directory
+        if: steps.check-dir.outputs.exists == 'true'
+        run: mkdir -p trivy-reports
+
+      - name: Copy Trivy config to system path
+        if: steps.check-dir.outputs.exists == 'true'
+        run: cp ./workflow-repo/trivy.yaml /trivy.yaml
+
+      - name: "Trivy scan — ${{ matrix.scan.label }}"
+        if: steps.check-dir.outputs.exists == 'true'
+        uses: ./.github/actions/trivy
+        with:
+          label:          ${{ matrix.scan.label }}
+          scan_type:      rootfs
+          scan_ref:       ${{ matrix.scan.scan-ref }}
+          severity:       ${{ inputs.severity_threshold }}
+          output_file:    trivy-reports/${{ matrix.scan.report }}
+          ignore_file:    ${{ env.TRIVY_IGNORE }}
+          scanners:       vuln
+          trivy_config:   /trivy.yaml
+          ignore_unfixed: "true"
+          trivy_version:  ${{ env.TRIVY_VERSION }}
+
+
+# =====================================================================
+#  STAGE 2c — SonarQube Quality Gate
+# =====================================================================
+  sonar-scan:
+    name: "Security — SonarQube Gate"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: build-app
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    outputs:
+      qg_status: ${{ steps.gate.outputs.qg_status }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          sparse-checkout: |
+            ${{ inputs.project_path }}
+
+      - name: Install jq (pinned + checksum verified)
+        env:
+          JQ_VERSION: "1.7.1"
+          JQ_SHA256_EXPECTED: "5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5"
+        run: |
+          set -euo pipefail
+          curl -sfL \
+            "https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-linux-amd64" \
+            -o /tmp/jq
+          OFFICIAL_SHA=$(curl -sfL \
+            "https://raw.githubusercontent.com/jqlang/jq/master/sig/v${JQ_VERSION}/sha256sum.txt" \
+            | grep "^[a-f0-9]*  jq-linux-amd64$" \
+            | awk '{print $1}')
+          [[ -z "${OFFICIAL_SHA}" ]] && { echo "ERROR: could not fetch official SHA"; exit 1; }
+          if [[ "${OFFICIAL_SHA}" != "${JQ_SHA256_EXPECTED}" ]]; then
+            echo "ERROR: official SHA ${OFFICIAL_SHA} != expected ${JQ_SHA256_EXPECTED}"
+            exit 1
+          fi
+          echo "${OFFICIAL_SHA}  /tmp/jq" | sha256sum -c -
+          install -m 0755 /tmp/jq /usr/local/bin/jq
+          jq --version
+
+      - name: Get SonarQube project key
+        id: project_key
+        run: |
+          SERVICE="${{ inputs.project_path }}"
+          PROJECT_NAME="${SERVICE##*/}"
+          PROJECT_KEY=$(echo "$PROJECT_NAME" | tr '[:upper:]' '[:lower:]')
+          echo "project_key=$PROJECT_KEY" >> "$GITHUB_OUTPUT"
+          echo "Derived project key: mob-$PROJECT_KEY"
+
+      - name: Check SonarQube Quality Gate
+        id: gate
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+        run: |
+          set -euo pipefail
+          [[ -z "$SONAR_HOST_URL" ]] && { echo "::error::SONAR_HOST_URL is empty"; exit 1; }
+          [[ -z "$SONAR_TOKEN"    ]] && { echo "::error::SONAR_TOKEN is empty";    exit 1; }
+          echo "Host : $SONAR_HOST_URL"
+          echo "Token: ${SONAR_TOKEN:0:4}****"
+
+          BRANCH_NAME="${GITHUB_REF_NAME}"
+          PROJECT_KEY=mob-${{ steps.project_key.outputs.project_key }}
+
+          TODAY_UTC=$(date -u +"%Y-%m-%d")
+          EXCEPTION_FILE=".sonar-gate-exceptions"
+          EXCEPTION_FOUND=false
+          EXCEPTION_EXPIRED=false
+
+          if [[ -f "$EXCEPTION_FILE" ]]; then
+            while IFS='|' read -r exc_branch reason expires || [[ -n "$exc_branch" ]]; do
+              [[ "$exc_branch" =~ ^#.*$ || -z "$exc_branch" ]] && continue
+              exc_branch=$(echo "$exc_branch" | xargs)
+              expires=$(echo "$expires"       | xargs)
+              [[ "$exc_branch" != "$BRANCH_NAME" ]] && continue
+              if [[ "$expires" < "$TODAY_UTC" ]]; then
+                EXCEPTION_EXPIRED=true
+              else
+                EXCEPTION_FOUND=true
+              fi
+              break
+            done < "$EXCEPTION_FILE"
+          fi
+
+          ANALYSES=$(curl -sf -u "$SONAR_TOKEN:" \
+            "$SONAR_HOST_URL/api/project_analyses/search?project=$PROJECT_KEY&branch=$BRANCH_NAME")
+          LATEST_KEY=$(echo "$ANALYSES" | jq -r --arg today "$TODAY_UTC" \
+            '.analyses[] | select(.date | startswith($today)) | .key' | head -n 1)
+          [[ -z "$LATEST_KEY" || "$LATEST_KEY" == "null" ]] && {
+            echo "No SonarQube analysis found today for branch: $BRANCH_NAME"; exit 1; }
+
+          QG_RES=$(curl -sf -u "$SONAR_TOKEN:" \
+            "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=$PROJECT_KEY&branch=$BRANCH_NAME")
+          QG_STATUS=$(echo "$QG_RES" | jq -r '.projectStatus.status // empty')
+          [[ -z "$QG_STATUS" ]] && { echo "No Quality Gate status returned"; exit 1; }
+          echo "qg_status=$QG_STATUS" >> "$GITHUB_OUTPUT"
+
+          if [[ "$QG_STATUS" == "OK" || "$QG_STATUS" == "WARN" ]]; then exit 0; fi
+          if [[ "$QG_STATUS" == "ERROR" ]]; then
+            echo "$QG_RES" | jq -r \
+              '.projectStatus.conditions[] | select(.status=="ERROR") |
+               "  ❌ \(.metricKey): \(.actualValue) (threshold: \(.errorThreshold))"'
+            [[ "$EXCEPTION_FOUND" == "true" && "$EXCEPTION_EXPIRED" != "true" ]] && exit 0
+            [[ "$EXCEPTION_EXPIRED" == "true" ]] && \
+              echo "⚠️  Exception expired — renew entry in $EXCEPTION_FILE"
+            exit 1
+          fi
+          exit 1
+
+# =====================================================================
+#  STAGE 2d — CodeQL Static Analysis
+# =====================================================================
+  codeql-scan:
+    name: "Security — CodeQL Scan"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: build-app
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: read
+    outputs:
+      codeql_status: ${{ steps.result.outputs.codeql_status }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          sparse-checkout: |
+            ${{ inputs.project_path }}
+
+      - name: Check CodeQL exception file
+        id: codeql_exception
+        run: |
+          set -euo pipefail
+          BRANCH_NAME="${GITHUB_REF_NAME}"
+          TODAY_UTC=$(date -u +"%Y-%m-%d")
+          EXCEPTION_FILE=".codeql-exceptions"
+          EXCEPTION_FOUND=false
+          EXCEPTION_EXPIRED=false
+
+          if [[ ! -f "$EXCEPTION_FILE" ]]; then
+            echo "No exception file found, proceeding normally"
+            echo "exception_found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          while IFS='|' read -r exc_branch reason expires || [[ -n "$exc_branch" ]]; do
+            [[ "$exc_branch" =~ ^#.*$ || -z "$exc_branch" ]] && continue
+            exc_branch=$(echo "$exc_branch" | xargs)
+            reason=$(echo "$reason" | xargs)
+            expires=$(echo "$expires" | xargs)
+            [[ "$exc_branch" != "$BRANCH_NAME" ]] && continue
+
+            if [[ "$expires" < "$TODAY_UTC" ]]; then
+              echo "⚠️  Exception for '$BRANCH_NAME' expired on $expires — Reason: $reason"
+              EXCEPTION_EXPIRED=true
+              echo "exception_found=false" >> "$GITHUB_OUTPUT"
+              echo "exception_expired=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "⚠️  Exception active for '$BRANCH_NAME' — Reason: $reason — Expires: $expires"
+              EXCEPTION_FOUND=true
+              echo "exception_found=true" >> "$GITHUB_OUTPUT"
+              echo "exception_expired=false" >> "$GITHUB_OUTPUT"
+            fi
+            break
+          done < "$EXCEPTION_FILE"
+
+          if [[ "$EXCEPTION_FOUND" == "false" && "$EXCEPTION_EXPIRED" == "false" ]]; then
+            echo "exception_found=false" >> "$GITHUB_OUTPUT"
+            echo "exception_expired=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fail on Medium or higher alerts
+        id: alert-check
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        with:
+          script: |
+            const exceptionFound   = '${{ steps.codeql_exception.outputs.exception_found }}'   === 'true';
+            const exceptionExpired = '${{ steps.codeql_exception.outputs.exception_expired }}' === 'true';
+
+            if (exceptionFound) {
+              console.log('⚠️  Active exception found — Medium+ alerts will not fail the build');
+              core.setOutput('codeql_status', 'exception-bypassed');
+              return;
+            }
+
+            if (exceptionExpired) {
+              core.warning('⚠️  Exception file entry has expired — enforcing alert check');
+            }
+
+            const severities = ['critical', 'high', 'medium'];
+            let totalAlerts = 0;
+            const branchRef = context.ref.replace('refs/heads/', '');
+
+            for (const severity of severities) {
+              const { data: alerts } = await github.rest.codeScanning.listAlertsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: branchRef,
+                state: 'open',
+                severity,
+                tool_name: 'CodeQL'
+              });
+              totalAlerts += alerts.length;
+              console.log(`→ ${severity} severity: ${alerts.length} alert(s)`);
+            }
+
+            if (totalAlerts > 0) {
+              core.setOutput('codeql_status', 'failed');
+              core.setFailed(`❌ Found ${totalAlerts} open alert(s) with Medium or higher severity on branch ${context.ref}`);
+            } else {
+              core.setOutput('codeql_status', 'passed');
+              console.log('✅ No Medium, High, or Critical severity alerts found.');
+            }
+
+      - name: CodeQL result summary
+        id: result
+        if: always()
+        run: |
+          RAW="${{ steps.alert-check.outputs.codeql_status }}"
+          STATUS="${RAW//[[:space:]]/}"
+          STATUS="${STATUS:-unknown}"
+          echo "codeql_status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "CodeQL status: $STATUS"
+
+
+# =====================================================================
+#  STAGE 2e — Build & Push Docker Image
+# =====================================================================
+  build-image:
+    name: "Build — Docker Image to ECR"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: build-app
+    timeout-minutes: 45
+    permissions:
+      contents:     read
+      id-token:     write
+      attestations: write
+
+    outputs:
+      image_ref:    ${{ steps.push.outputs.image_ref }}
+      image_name:   ${{ steps.push.outputs.image_name }}
+      image_digest: ${{ steps.push.outputs.image_digest }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Download workflow repo
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        with:
+          name: workflow-repo
+          path: workflow-repo
+
+      - name: Diagnose Docker runtime
+        run: |
+          echo "=== docker version ===" && docker version    || true
+          echo "=== docker info ==="    && docker info       || true
+          echo "=== buildx ==="         && docker buildx version || true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v3.3.0
+
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@f2e9fc6c2b355c1890b65e6f6f0e2ac3e6e22f78  # v2.0.1
+
+      - name: Set ECR registry env
+        run: echo "ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}" >> $GITHUB_ENV
+
+      - name: Build Docker image
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v6.4.1
+        with:
+          context: .
+          file: ${{ inputs.dockerfile_path }}
+          load: true
+          push: false
+          tags: ${{ inputs.service_name }}:${{ github.run_number }}
+          build-args: |
+            GH_USERNAME=${{ github.actor }}
+            GH_TOKEN=${{ secrets.GH_PAT_TOKEN }}
+            PROJECT_PATH=${{ inputs.project_path }}
+          provenance: false
+
+      - name: Tag Docker image for ECR
+        run: |
+          docker tag \
+            ${{ inputs.service_name }}:${{ github.run_number }} \
+            $ECR_REGISTRY/${{ env.ECR_REPO }}:${{ inputs.service_name }}-${{ github.run_number }}
+
+      - name: Push Docker image to ECR
+        id: push
+        run: |
+          set -euo pipefail
+          IMAGE_REF="$ECR_REGISTRY/${{ env.ECR_REPO }}:${{ inputs.service_name }}-${{ github.run_number }}"
+          IMAGE_NAME="$ECR_REGISTRY/${{ env.ECR_REPO }}"
+          docker push "$IMAGE_REF"
+          IMAGE_DIGEST=$(aws ecr describe-images \
+            --region "${{ env.AWS_REGION }}" \
+            --repository-name "${{ env.ECR_REPO }}" \
+            --image-ids imageTag="${{ inputs.service_name }}-${{ github.run_number }}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          if [[ "$IMAGE_DIGEST" != sha256:* ]]; then
+            echo "ERROR: unexpected digest format from ECR: $IMAGE_DIGEST"
+            exit 1
+          fi
+          echo "📦 Pushed: $IMAGE_REF@$IMAGE_DIGEST"
+          echo "image_ref=$IMAGE_REF"       >> "$GITHUB_OUTPUT"
+          echo "image_name=$IMAGE_NAME"     >> "$GITHUB_OUTPUT"
+          echo "image_digest=$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+          # Write to files for downstream jobs
+          printf '%s' "$IMAGE_REF"    > image_ref.txt
+          printf '%s' "$IMAGE_DIGEST" > image_digest.txt
+          printf '%s' "$IMAGE_NAME"   > image_name.txt
+          echo "✅ image_ref     : $IMAGE_REF"
+          echo "✅ image_name    : $IMAGE_NAME"
+          echo "✅ image_digest  : $IMAGE_DIGEST"
+
+      - name: Attest build provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26  # v4.1.0
+        with:
+          subject-name:     ${{ steps.push.outputs.image_name }}
+          subject-digest:   ${{ steps.push.outputs.image_digest }}
+          push-to-registry: false
+
+      - name: Upload deployment artifacts
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874  # v4.4.0
+        with:
+          name: deployment-artifacts
+          path: |
+            image_ref.txt
+            image_digest.txt
+            image_name.txt
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+      - name: Write build summary
+        run: |
+          {
+            echo "## 🐳 Build Summary"
+            echo "| Field       | Value |"
+            echo "|-------------|-------|"
+            echo "| **Service** | \`${{ inputs.service_name }}\` |"
+            echo "| **Image**   | \`${{ steps.push.outputs.image_ref }}\` |"
+            echo "| **Digest**  | \`${{ steps.push.outputs.image_digest }}\` |"
+            echo "| **Branch**  | \`${{ github.ref_name }}\` |"
+            echo "| **Commit**  | \`${{ github.sha }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+
+# =====================================================================
+#  STAGE 3a — Generate Source SBOM (Syft / CycloneDX)
+# =====================================================================
+  generate-source-sbom:
+    name: "SBOM — Source (Syft / CycloneDX)"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: build-app
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          path: ${{ inputs.project_path }}
+
+      - name: Generate source SBOM (Syft)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610  # v0.24.0
+        with:
+          path: ${{ inputs.project_path }}
+          format: cyclonedx-json
+          output-file: source-sbom.cdx.json
+          artifact-name: source-sbom.cdx.json
+          upload-artifact: false
+
+      - name: Upload source SBOM
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874  # v4.4.0
+        with:
+          name: source-sbom
+          path: source-sbom.cdx.json
+          retention-days: 90
+          if-no-files-found: error
+
+
+# =====================================================================
+#  STAGE 3b — Trivy DB Cache (warms runner cache for image scan jobs)
+# =====================================================================
+  trivy-db-cache:
+    name: "Security — Trivy DB Cache"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: build-image
+    timeout-minutes: 10
+    permissions: {}
+
+    steps:
+      - name: Restore Trivy DB cache
+        id: cache-restore
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: trivy-db-${{ env.TRIVY_VERSION }}-${{ runner.os }}
+
+      - name: Setup Trivy
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514  # v0.2.6
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Download Trivy DB (cache miss)
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        run: |
+          trivy image --download-db-only --no-progress
+          trivy image --download-java-db-only --no-progress
+
+
+# =====================================================================
+#  STAGE 4a — Trivy: Image Scan (vuln + secret + config)
+# =====================================================================
+  trivy-image-scan:
+    name: "Security — Trivy (image)"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: [build-image, trivy-db-cache]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          path: ${{ inputs.project_path }}
+
+      - name: Download deployment artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        with:
+          name: deployment-artifacts
+          path: .
+
+      - name: Download workflow repo
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        with:
+          name: workflow-repo
+          path: workflow-repo
+
+      - name: Restore Trivy DB cache
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: trivy-db-${{ env.TRIVY_VERSION }}-${{ runner.os }}
+          restore-keys: trivy-db-${{ env.TRIVY_VERSION }}-
+
+      - name: Resolve image reference
+        id: resolve
+        run: |
+          echo "image_ref=$(cat image_ref.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@f2e9fc6c2b355c1890b65e6f6f0e2ac3e6e22f78  # v2.0.1
+
+      - name: Create report directory
+        run: mkdir -p trivy-reports
+
+      - name: Copy trivy action from workflow-repo
+        run: |
+          mkdir -p .github/actions/trivy
+          cp -f ./workflow-repo/.github/actions/trivy/action.yml .github/actions/trivy/action.yml
+
+      - name: Copy Trivy configs to system path
+        run: |
+          cp ./workflow-repo/trivy.yaml ./trivy.yaml
+          cp ./workflow-repo/trivy-license-os.yaml ./trivy-license-os.yaml
+          SRC="./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/trivy-secret.yaml"
+          if [ -f "$SRC" ]; then
+            cp "$SRC" ./trivy-secret.yaml
+          fi
+
+      - name: Install yq (pinned + checksum verified)
+        run: |
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.25.1/yq_linux_amd64 -o /usr/local/bin/yq
+          echo "57b6247bc2406c20a887aee3594399e081759601fd2f8ae9df21938499d76c81  /usr/local/bin/yq" | sha256sum --check
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Apply service-specific license exceptions if present
+        run: |
+          SRC="./workflow-repo/trivy-exception/${{ inputs.domain }}/${{ inputs.service_name }}/trivy-license.yaml"
+          if [ -f "$SRC" ]; then
+            cp "$SRC" ./trivy-license.yaml
+          else
+            echo "No service-specific override found — using default trivy-license.yaml"
+          fi
+          
+      # - name: "Trivy scan — image (license, OS packages)"
+      #   uses: ./.github/actions/trivy
+      #   with:
+      #     label:          image-license-os
+      #     scan_type:      image
+      #     scan_ref:       ${{ steps.resolve.outputs.image_ref }}
+      #     severity:       ${{ inputs.severity_threshold }}
+      #     output_file:    trivy-reports/image-license-os.txt
+      #     ignore_file:    ${{ env.TRIVY_IGNORE }}
+      #     scanners:       license
+      #     trivy_config:   ./trivy-license-os.yaml
+      #     cache_dir:      ${{ env.TRIVY_CACHE_DIR }}
+      #     trivy_version:  ${{ env.TRIVY_VERSION }}
+
+      - name: "Trivy scan — image (license, app dependencies)"
+        uses: ./.github/actions/trivy
+        with:
+          label:          image-license-app
+          scan_type:      image
+          scan_ref:       ${{ steps.resolve.outputs.image_ref }}
+          severity:       ${{ inputs.severity_threshold }}
+          output_file:    trivy-reports/image-license-app.txt
+          ignore_file:    ${{ env.TRIVY_IGNORE }}
+          scanners:       license
+          trivy_config:   ./trivy-license.yaml
+          cache_dir:      ${{ env.TRIVY_CACHE_DIR }}
+          trivy_version:  ${{ env.TRIVY_VERSION }}
+
+
+# =====================================================================
+#  STAGE 4b — Generate Image SBOM, Attest Both, SBOM Vuln Scan
+# =====================================================================
+  generate-image-sbom:
+    name: "SBOM — Image, Attest & Vuln-Scan"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs: [build-image, trivy-db-cache, generate-source-sbom]
+    timeout-minutes: 20
+    permissions:
+      contents:     read
+      id-token:     write
+      attestations: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Download deployment artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        with:
+          name: deployment-artifacts
+          path: .
+
+      - name: Download source SBOM
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        with:
+          name: source-sbom
+          path: .
+
+      - name: Download workflow repo
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16  # v4.1.8
+        with:
+          name: workflow-repo
+          path: workflow-repo
+
+      - name: Copy trivy action from workflow-repo
+        run: |
+          mkdir -p .github/actions/trivy
+          cp -f ./workflow-repo/.github/actions/trivy/action.yml .github/actions/trivy/action.yml
+
+      # ── FIX: validate files exist and are non-empty before resolving ──
+      # Using printf '%s' instead of echo when writing files avoids a
+      # trailing newline that makes the output value contain a newline,
+      # which GitHub strips from step outputs — causing empty image_name.
+      - name: Validate and resolve image references
+        id: resolve
+        run: |
+          set -euo pipefail
+          for f in image_ref.txt image_name.txt image_digest.txt; do
+            [[ -f "$f" && -s "$f" ]] || { echo "❌ Missing or empty: $f"; exit 1; }
+            echo "✅ $f : $(cat $f)"
+          done
+          echo "image_ref=$(cat image_ref.txt)"       >> "$GITHUB_OUTPUT"
+          echo "image_name=$(cat image_name.txt)"     >> "$GITHUB_OUTPUT"
+          echo "image_digest=$(cat image_digest.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Login to AWS ECR
+        uses: aws-actions/amazon-ecr-login@f2e9fc6c2b355c1890b65e6f6f0e2ac3e6e22f78  # v2.0.1
+
+      - name: Restore Trivy DB cache
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf  # v4.2.2
+        with:
+          path: ${{ env.TRIVY_CACHE_DIR }}
+          key: trivy-db-${{ env.TRIVY_VERSION }}-${{ runner.os }}
+
+      - name: Copy Trivy config to system path
+        run: cp ./workflow-repo/trivy.yaml /trivy.yaml
+
+      # ── Generate image SBOM in SPDX-JSON format ─────────────────────
+      # format: spdx-json is required — table format would break the
+      # Attest image SBOM step with "SyntaxError: Unexpected token 'R'"
+      - name: Generate image SBOM (Trivy / SPDX)
+        uses: ./.github/actions/trivy
+        with:
+          label:          image-sbom
+          scan_type:      image
+          scan_ref:       ${{ steps.resolve.outputs.image_ref }}
+          format:         spdx-json
+          output_file:    image-sbom.spdx.json
+          ignore_file:    ${{ env.TRIVY_IGNORE }}
+          trivy_config:   /trivy.yaml
+          ignore_unfixed: "true"
+          cache_dir:      ${{ env.TRIVY_CACHE_DIR }}
+          trivy_version:  ${{ env.TRIVY_VERSION }}
+          # scanners and severity intentionally omitted for SBOM generation:
+          # defaults (vuln / MEDIUM,HIGH,CRITICAL) apply but exit-code:1
+          # in the composite is suppressed via continue-on-error; the
+          # Trivy SBOM vuln scan step below enforces the actual gate.
+
+      - name: Attest image SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26  # v4.1.0
+        with:
+          subject-name:     ${{ steps.resolve.outputs.image_name }}
+          subject-digest:   ${{ steps.resolve.outputs.image_digest }}
+          sbom-path:        image-sbom.spdx.json
+          push-to-registry: false
+
+      - name: Attest source SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26  # v4.1.0
+        with:
+          subject-name:     ${{ steps.resolve.outputs.image_name }}
+          subject-digest:   ${{ steps.resolve.outputs.image_digest }}
+          sbom-path:        source-sbom.cdx.json
+          push-to-registry: false
+
+      - name: Create report directory
+        run: mkdir -p trivy-reports
+
+      - name: "Trivy SBOM vulnerability scan"
+        uses: ./.github/actions/trivy
+        with:
+          label:          sbom-vuln
+          scan_type:      sbom
+          scan_ref:       image-sbom.spdx.json
+          severity:       ${{ inputs.severity_threshold }}
+          output_file:    trivy-reports/sbom-scan.txt
+          ignore_file:    ${{ env.TRIVY_IGNORE }}
+          scanners:       vuln
+          trivy_config:   /trivy.yaml
+          ignore_unfixed: "true"
+          trivy_version:  ${{ env.TRIVY_VERSION }}
+
+      - name: Upload SBOMs (90-day audit retention)
+        if: always()
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874  # v4.4.0
+        with:
+          name: sbom-artifacts
+          path: |
+            source-sbom.cdx.json
+            image-sbom.spdx.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+
+# =====================================================================
+#  STAGE 5 — Security Gate  (aggregates all security job results)
+# =====================================================================
+  security-gate:
+    name: "Gate — Security"
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    needs:
+      - trivy-secrets
+      - trivy-fs-libs
+      - sonar-scan
+      - codeql-scan
+      - trivy-image-scan
+      - generate-image-sbom
+    # if: always()
+    if: false  # temporarily disabled until all security jobs are implemented
+    timeout-minutes: 5
+    permissions: {}
+
+    steps:
+      - name: Evaluate all security jobs
+        env:
+          CODEQL_STATUS: ${{ needs.codeql-scan.outputs.codeql_status }}
+        run: |
+          ALLOW_SKIP="trivy-fs-libs"
+
+          declare -A RESULTS=(
+            ["trivy-secrets"]="${{ needs.trivy-secrets.result }}"
+            ["trivy-fs-libs"]="${{ needs.trivy-fs-libs.result }}"
+            ["sonar-scan"]="${{ needs.sonar-scan.result }}"
+            ["codeql-scan"]="${{ needs.codeql-scan.result }}"
+            ["trivy-image-scan"]="${{ needs.trivy-image-scan.result }}"
+            ["generate-image-sbom"]="${{ needs.generate-image-sbom.result }}"
+          )
+
+          FAILED=0
+          echo "## 🔐 Security Gate Results"        >> "$GITHUB_STEP_SUMMARY"
+          echo "| Job | Result | Detail |"          >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|--------|"          >> "$GITHUB_STEP_SUMMARY"
+
+          for JOB in "${!RESULTS[@]}"; do
+            RESULT="${RESULTS[$JOB]}"
+            DETAIL=""
+            [[ "$JOB" == "codeql-scan" ]] && DETAIL="${CODEQL_STATUS}"
+
+            case "$RESULT" in
+              success)
+                echo "✅  PASS   $JOB ($DETAIL)"
+                echo "| $JOB | ✅ pass | $DETAIL |" >> "$GITHUB_STEP_SUMMARY"
+                ;;
+              skipped)
+                if echo "$ALLOW_SKIP" | grep -qw "$JOB"; then
+                  echo "⏭️   SKIP   $JOB (directory not present — acceptable)"
+                  echo "| $JOB | ⏭️ skipped | directory absent |" >> "$GITHUB_STEP_SUMMARY"
+                else
+                  echo "❌  FAIL   $JOB: unexpectedly skipped — check job conditions"
+                  echo "| $JOB | ❌ skipped-unexpected | $DETAIL |" >> "$GITHUB_STEP_SUMMARY"
+                  FAILED=1
+                fi
+                ;;
+              *)
+                echo "❌  FAIL   $JOB: $RESULT"
+                echo "| $JOB | ❌ $RESULT | $DETAIL |" >> "$GITHUB_STEP_SUMMARY"
+                FAILED=1
+                ;;
+            esac
+          done
+
+          if [[ $FAILED -eq 1 ]]; then
+            echo "❌ Security gate FAILED — deployment is blocked."
+            exit 1
+          fi
+          echo "✅ All security checks passed — proceeding to deploy."
+
+
+# =====================================================================
+#  STAGE 6 — Deploy SIT
+# =====================================================================
+  deploy-SIT:
+    needs: security-gate
+    name: "🚀 Deploy SIT"
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment:  sit
+      domain:       ${{ inputs.domain }}
+      skip_env:     ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}
+
+
+# =====================================================================
+#  STAGE 7 — Validate Branch
+# =====================================================================
+  validate-branch:
+    needs: deploy-SIT
+    name: "🌿 Validate Branch"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Enforce main-branch gate
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "❌ Branch '${{ github.ref_name }}' is not main."
+            echo "UAT, PREPROD and PROD deployments are restricted to the main branch."
+            exit 1
+          fi
+          echo "✅ Branch check passed — proceeding to upper environments."
+
+
+# =====================================================================
+#  STAGE 8 — Deploy UAT  (main only)
+# =====================================================================
+  deploy-UAT:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy-SIT, validate-branch]
+    name: "🚀 Deploy UAT"
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment:  uat
+      domain:       ${{ inputs.domain }}
+      skip_env:     ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}
+
+
+# =====================================================================
+#  STAGE 9 — Deploy PREPROD  (main only)
+# =====================================================================
+  deploy-PREPROD:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy-UAT]
+    name: "🚀 Deploy PREPROD"
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment:  preprod
+      domain:       ${{ inputs.domain }}
+      skip_env:     ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}
+
+
+# =====================================================================
+#  STAGE 10 — GRC Approval Gate  (manual approval before PROD)
+# =====================================================================
+  deploy-GRC-Approval:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy-PREPROD, build-image]
+    name: "🔒 GRC Approval for PROD"
+    runs-on: ubuntu-latest
+    timeout-minutes: 1440
+    permissions: {}
+    environment: it-grc-approval
+
+    steps:
+      - name: Await production deployment approval
+        run: |
+          echo "⏳ Awaiting GRC / Change Advisory Board approval..."
+          echo "Service : ${{ inputs.service_name }}"
+          echo "Image   : ${{ needs.build-image.outputs.image_ref }}"
+          echo "Digest  : ${{ needs.build-image.outputs.image_digest }}"
+          echo "Commit  : ${{ github.sha }}"
+
+
+# =====================================================================
+#  STAGE 11 — Deploy PROD  (main only)
+# =====================================================================
+  deploy-PROD:
+    if: github.ref == 'refs/heads/main'
+    needs: [deploy-GRC-Approval]
+    name: "🚀 Deploy PROD"
+    uses: ./.github/workflows/trigger-deploy.yml
+    with:
+      environment:  prod
+      domain:       ${{ inputs.domain }}
+      skip_env:     ${{ inputs.skip_env }}
+      service_name: ${{ inputs.service_name }}

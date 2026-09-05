@@ -1,0 +1,20 @@
+# GitHub Advanced Security configuration for this repository
+# See: https://docs.github.com/en/code-security/github-advanced-security/configuration-options-for-github-advanced-security
+
+version: 1
+
+# Enable or disable features for this repository
+features:
+  secret_scanning: true
+  secret_scanning_push_protection: true
+  code_scanning: true
+  dependency_scanning: true
+
+# # Optionally, you can specify custom settings for code scanning
+# code_scanning:
+#   languages:
+#     - java
+#   # Optionally, you can specify custom query packs or rules here
+#   # query_packs:
+#   #   - name: security-extended
+#   #   - name: security-and-quality

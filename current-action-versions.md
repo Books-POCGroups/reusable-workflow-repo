@@ -1,0 +1,27 @@
+- [Checkout Repository](https://github.com/actions/checkout/releases/tag/v6.0.2)
+  - version: `6.0.2`
+  - `actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2`
+- [Dependency Review](https://github.com/actions/dependency-review-action/releases/tag/v4.9.0)
+  - version: `v4.9.0`
+  - `actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0`
+- [Docker Login](https://github.com/docker/login-action/releases/tag/v4.1.0)
+  - version: `v4.1.0`
+  - `docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.0.1`
+- [Download Artifact](https://github.com/actions/download-artifact/releases/tag/v8.0.1)
+  - version: `v8.0.1`
+  - `actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1`
+- [Login to AWS ECR](https://github.com/aws-actions/amazon-ecr-login/releases/tag/v2.1.2)
+  - version: `v2.1.2`
+  - `aws-actions/amazon-ecr-login@f2e9fc6c2b355c1890b65e6f6f0e2ac3e6e22f78 # v2.1.2`
+- [Secret Scanning Review Action](https://github.com/advanced-security/secret-scanning-review-action/releases/tag/v2.2.4)
+  - version: `v2.2.4`
+  - `advanced-security/secret-scanning-review-action@a7ff899468cfef1218439fc5f28799e4d57952e2 #v2.2.4`
+- [Setup Helm](https://github.com/Azure/setup-helm/releases/tag/v5.0.0)
+  - version: `v5.0.0`
+  - `azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0`
+- [Trivy Scanner](https://github.com/aquasecurity/trivy-action/releases/tag/v0.35.0)
+  - version: `v0.35.0`
+  - `aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0`
+- [Upload Artifact](https://github.com/actions/upload-artifact/releases/tag/v7.0.0)
+  - version: `v7.0.0`
+  - `actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0`

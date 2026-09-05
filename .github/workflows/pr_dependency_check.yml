@@ -1,0 +1,73 @@
+name: 'Dependency Review'
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Service to scan"
+        required: true
+        type: string
+      fail-on-severity:
+        description: 'Fail on vulnerabilities of this severity or higher (low, moderate, high, critical)'
+        required: false
+        default: 'moderate'
+        type: string
+      allow-licenses:
+        description: 'Comma-separated list of allowed licenses'
+        required: false
+        default: 'MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD'
+        type: string
+      fail-on-scopes:
+        description: 'Comma-separated list of dependency scopes to fail on (runtime, development)'
+        required: false
+        default: 'runtime,development'
+        type: string
+      vulnerability-check:
+        description: 'Enable vulnerability check'
+        required: false
+        default: true
+        type: boolean
+      comment-summary-in-pr:
+        description: 'Show summary comment in PR (always, never, on-failure)'
+        required: false
+        default: 'always'
+        type: string
+    outputs:
+      result:
+        description: "Overall Dependency Review result: success|failure"
+        value: ${{ jobs.dependency-review.outputs.result }}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      result: ${{ steps.setoutput.outputs.result }}
+    steps:
+      - name: 'Checkout Repository'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.head_ref }}
+
+      - name: 'Dependency Review'
+        id: review
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        continue-on-error: true
+        with:
+          fail-on-severity: ${{ inputs.fail-on-severity }}
+          allow-licenses: ${{ inputs.allow-licenses }}
+          fail-on-scopes: ${{ inputs.fail-on-scopes }}
+          vulnerability-check: ${{ inputs.vulnerability-check }}
+          comment-summary-in-pr: ${{ inputs.comment-summary-in-pr }}
+
+      - id: setoutput
+        if: always()
+        run: |
+          echo "outcome=${{ steps.review.outcome }}"
+          echo "result=${{ steps.review.outcome == 'failure' && 'failure' || 'success' }}" >> "$GITHUB_OUTPUT"

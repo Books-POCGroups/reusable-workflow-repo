@@ -1,0 +1,194 @@
+name: 'CodeQL Microservice Scan'
+description: 'Scan a microservice with CodeQL and upload SARIF results.'
+inputs:
+  service:
+    description: 'Microservice directory name under Services/'
+    required: false
+    default: ''
+  language:
+    description: 'Language for CodeQL analysis'
+    required: true
+  token:
+    description: 'GitHub token for authentication'
+    required: true
+
+outputs:
+  has_vulnerabilities:
+    description: "Whether High/Critical vulnerabilities were found"
+    value: ${{ steps.vuln_check.outputs.has_vulnerabilities }}
+
+  vuln_table:
+    description: "Markdown table of vulnerabilities"
+    value: ${{ steps.vuln_check.outputs.vuln_table }}
+
+runs:
+  using: 'composite'
+  steps:
+  
+    # Initialize CodeQL for Java / Java-Kotlin
+    - name: Initialize CodeQL (Java / Kotlin)
+      if: inputs.language != 'actions'
+      uses: github/codeql-action/init@v4
+      with:
+        languages: ${{ inputs.language }}
+        build-mode: manual
+        source-root: ${{ inputs.service }}
+        config-file: ${{ github.workspace }}/workflow-repo/.github/codeql/codeql-config.yml
+
+    # Initialize CodeQL for GitHub Actions
+    - name: Initialize CodeQL (GitHub Actions)
+      if: inputs.language == 'actions'
+      uses: github/codeql-action/init@v4
+      with:
+        languages: actions
+        build-mode: none
+        config-file: ${{ github.workspace }}/workflow-repo/.github/codeql/codeql-config.yml
+
+    - name: Build service for CodeQL (Gradle)
+      if: inputs.language != 'actions'
+      shell: bash
+      working-directory: ${{ inputs.service }}
+      env:
+        GH_USERNAME: ${{ github.actor }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        pwd
+        ls -l
+       
+        chmod +x gradlew
+        ./gradlew clean build -x test \
+          --no-daemon \
+          --warn \
+          -Dorg.gradle.jvmargs=-Xmx2048M
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v4
+      with:
+        category: "/language:${{inputs.language}}"
+      
+    # - name: CodeQl scan file check
+    #   shell: bash
+    #   run: |
+    #     echo "SARIF output dir is: $CODEQL_ACTION_SARIF_RESULTS_OUTPUT_DIR"
+    #     ls -l "$CODEQL_ACTION_SARIF_RESULTS_OUTPUT_DIR"
+
+    # - name: Debug SARIF severity
+    #   shell: bash
+    #   run: |
+    #     jq '
+    #       [.runs[].results[]
+    #       | {rule: .ruleId, level: .level, sev: .properties.securitySeverity}]
+    #     ' "$CODEQL_ACTION_SARIF_RESULTS_OUTPUT_DIR"/*.sarif
+
+    # - name: Pretty-print SARIF
+    #   shell: bash
+    #   run: |
+    #     jq '
+    #       .runs[].results[]
+    #       | {
+    #           rule: .ruleId,
+    #           message: .message.text,
+    #           file: .locations[0].physicalLocation.artifactLocation.uri,
+    #           startLine: .locations[0].physicalLocation.region.startLine
+    #         }
+    #     ' "$CODEQL_ACTION_SARIF_RESULTS_OUTPUT_DIR"/java.sarif
+    # - name: Pretty-print SARIF (resolved severity)
+    #   shell: bash
+    #   run: |
+    #     jq '
+    #       .runs[0] as $run
+    #       | $run.results[]
+    #       | .ruleId as $rid
+    #       | {
+    #           rule: $rid,
+    #           level: (
+    #             .level
+    #             // (
+    #               $run.tool.driver.rules[]
+    #               | select(.id == $rid)
+    #               | .defaultConfiguration.level
+    #             )
+    #           ),
+    #           securitySeverity: (
+    #             $run.tool.driver.rules[]
+    #             | select(.id == $rid)
+    #             | .properties["security-severity"]
+    #           ),
+    #           message: .message.text,
+    #           file: .locations[0].physicalLocation.artifactLocation.uri,
+    #           startLine: .locations[0].physicalLocation.region.startLine
+    #         }
+    #     ' "$CODEQL_ACTION_SARIF_RESULTS_OUTPUT_DIR/java.sarif"
+
+    # - name: Debug SARIF structure
+    #   shell: bash
+    #   run: |
+    #     jq '
+    #       {
+    #         runs: (.runs | length),
+    #         results: (.runs[0].results | length),
+    #         rules: (.runs[0].tool.driver.rules | length)
+    #       }
+    #     ' "$CODEQL_ACTION_SARIF_RESULTS_OUTPUT_DIR"/java.sarif
+
+    # - name: Post SARIF findings in the pull request
+    #   if: github.event_name == 'pull_request'
+    #   uses: sett-and-hive/sarif-to-comment-action@v2.0.1
+    #   with:
+    #     token: ${{ inputs.GITHUB_TOKEN }}
+    #     repository: ${{ github.repository }}
+    #     branch: ${{ github.head_ref }}
+    #     pr-number: ${{ github.event.number }}
+    #     sarif-file: scan/results/xss.sarif
+    #     title: My security issue
+    #     dry-run: false
+    
+
+
+    # - name: Check Vulnerabilities
+    #   id: vuln_check
+    #   shell: bash
+    #   run: |
+    #     set -e
+
+    #     echo "SARIF directory: $CODEQL_ACTION_SARIF_RESULTS_OUTPUT_DIR"
+
+    #     sarif_file=$(ls "$CODEQL_ACTION_SARIF_RESULTS_OUTPUT_DIR"/*.sarif 2>/dev/null | head -n 1)
+
+    #     if [ -z "$sarif_file" ]; then
+    #       echo "No SARIF file found"
+    #       echo "has_vulnerabilities=false" >> "$GITHUB_OUTPUT"
+    #       exit 0
+    #     fi
+
+    #     high_critical=$(jq -r '
+    #       .runs[].results[]
+    #       | select(
+    #           .level == "error"
+    #           or (.properties.securitySeverity // 0 | tonumber >= 8)
+    #         )
+    #       | [
+    #           .ruleId,
+    #           .message.text,
+    #           (.locations[0].physicalLocation.artifactLocation.uri // "N/A")
+    #         ]
+    #       | @tsv
+    #     ' "$sarif_file")
+
+    #     if [ -n "$high_critical" ]; then
+    #       echo "has_vulnerabilities=true" >> "$GITHUB_OUTPUT"
+
+    #       {
+    #         echo "vuln_table<<EOF"
+    #         echo "| Rule | Severity | Description | File |"
+    #         echo "|------|----------|-------------|------|"
+    #         echo "$high_critical" | awk -F'\t' '{
+    #           gsub(/\|/, "\\|", $2)
+    #           printf "| %s | High / Critical | %s | %s |\n", $1, $2, $3
+    #         }'
+    #         echo "EOF"
+    #       } >> "$GITHUB_OUTPUT"
+
+    #     else
+    #       echo "has_vulnerabilities=false" >> "$GITHUB_OUTPUT"
+    #     fi

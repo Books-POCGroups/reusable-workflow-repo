@@ -1,0 +1,82 @@
+name: CodeQL Analysis
+run-name: 'CodeQL Analysis on ${{ github.event_name }} - ${{ github.ref }}'
+on: 
+    workflow_call:
+      inputs:
+        service:
+          description: "Service to scan"
+          required: true
+          type: string
+        language:
+          description: "Programming language to scan (e.g., java-kotlin, actions)"
+          required: true
+          type: string
+      secrets:
+        GH_PAT_TOKEN:
+          description: "GitHub Personal Access Token"
+          required: true
+
+      outputs:
+        result:
+          description: "Overall CodeQL result: success|failure"
+          value: ${{ jobs.codeql-security.outputs.result }}
+          
+jobs:
+  codeql-security:
+    runs-on: codebuild-mib2-deafult-ubuntu-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      result: ${{ steps.setoutput.outputs.result }}
+    permissions:
+      actions: read
+      security-events: write
+      contents: read
+      checks: write
+      packages: read
+    env: #  same pattern as publish workflow
+      GH_USERNAME: ${{ github.actor }}
+      GH_TOKEN: ${{ secrets.GH_PAT_TOKEN }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.service }}
+
+    steps:
+      # Checkout code
+      - uses: actions/checkout@v4
+
+      - name: Checkout workflow repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: AbuDhabiCommercialBank/mibapp-workflow-repo
+          token: ${{ secrets.GH_PAT_TOKEN }}
+          path: workflow-repo
+          ref: main
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: "21"
+
+      # Force workflow detection log
+      - name: Force workflow detection
+        run: echo "Workflow v2.0 - $(date)"
+
+      # Run CodeQL Java/Kotlin scan
+      - id: codeql_scan
+        name: Run CodeQL Java Scan
+        uses: ./workflow-repo/.github/actions/codeql
+        with:
+          service: ${{ inputs.service }}
+          language: java-kotlin
+          token: ${{ secrets.GH_PAT_TOKEN }}
+
+      - name: Set job output
+        id: setoutput
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.codeql_scan.outcome }}" = "failure" ]; then
+            echo "result=failure" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=success" >> "$GITHUB_OUTPUT"
+          fi

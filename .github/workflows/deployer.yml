@@ -1,0 +1,50 @@
+name: Deploy to existing image
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: 'Domain of the service (eg: books)'
+        type: string
+        required: true
+      service_name:
+        description: 'Name of the service'
+        type: string
+        required: true
+      image_tag:
+        description: 'Existing image tag in ECR'
+        type: string
+        required: true
+      skip_env:
+        description: 'Comma-separated list of environments to skip'
+        type: string
+        required: true
+      runner:
+        description: 'Codebuild runner for the pipeline'
+        default: codebuild-mib2-rest-build-runner
+        type: string
+        required: false
+    secrets:
+      GH_PAT_TOKEN:
+        description: 'GitHub Personal Access Token'
+        required: true 
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+  attestations: write
+  security-events: write
+
+jobs:
+  workflow-build:
+    name: Initialize Deploy Workflow for ${{ inputs.image_tag }}
+    uses: ./.github/workflows/deploy-existing-image.yml
+    with:
+      domain: ${{ inputs.domain }}
+      service_name: ${{ inputs.service_name }}
+      image_tag: ${{ inputs.image_tag }}
+      skip_env: ${{ inputs.skip_env }}
+      runner: ${{ inputs.runner }}
+    secrets:
+      GH_PAT_TOKEN: ${{ secrets.GH_PAT_TOKEN }}

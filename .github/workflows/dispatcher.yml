@@ -1,0 +1,67 @@
+name: Dispatcher
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: 'Domain of the service (eg: books)'
+        type: string
+        required: true
+      dockerfile_path:
+        description: 'Path to Dockerfile'
+        type: string
+        required: false
+        default: 'docker/Dockerfile'
+      service:
+        description: 'Name of the service to process (eg: books-service)'
+        type: string
+        required: true
+      type:
+        description: 'Type of the application'
+        type: string
+        required: true
+        default: 'container'
+      project_path:
+        description: 'Path to the project directory'
+        type: string
+        required: true
+      skip_env:
+        description: 'Comma-separated list of environments to skip'
+        type: string
+        required: true
+      runner:
+        description: 'Codebuild runner for the pipeline'
+        default: codebuild-mib2-rest-build-runner
+        type: string
+        required: false
+    secrets:
+      GH_PAT_TOKEN:
+        description: 'GitHub Personal Access Token'
+        required: true 
+      SONAR_TOKEN:
+        description: 'SonarQube Token'
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+  attestations: write
+  security-events: read
+
+jobs:
+  # Job for AI Auth Service
+  workflow-build:
+    name: Initialize Build Workflow for ${{ inputs.service }}
+    uses: ./.github/workflows/trigger-build.yml
+    with:
+      domain: ${{ inputs.domain }}
+      dockerfile_path: ${{ inputs.dockerfile_path }}
+      service_name: ${{ inputs.service }}
+      skip_env: ${{ inputs.skip_env }}
+      project_path: ${{ inputs.project_path }}
+      runner: ${{ inputs.runner }}
+      type: ${{ inputs.type }}
+    secrets:
+      GH_PAT_TOKEN: ${{ secrets.GH_PAT_TOKEN }}
+      # SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

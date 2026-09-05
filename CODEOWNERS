@@ -1,0 +1,6 @@
+# All trivy ignore files
+**/.trivyignore @AbuDhabiCommercialBank/mibapp-devops
+**/.hadolint.yaml @AbuDhabiCommercialBank/mibapp-devops
+.github/ @AbuDhabiCommercialBank/mibapp-devops
+helm/ @AbuDhabiCommercialBank/mibapp-devops
+scripts/ @AbuDhabiCommercialBank/mibapp-devops

@@ -1,0 +1,71 @@
+
+replicaCount: 1
+
+image:
+  repository: 229410149234.dkr.ecr.eu-west-1.amazonaws.com/mib2-microservice-repo
+  tag: tag
+  pullPolicy: IfNotPresent
+
+service:
+  name: HELM_SERVICE_NAME
+  type: ClusterIP
+  port: 8080
+  containerPort: 8080
+
+configMap:
+  name: HELM_SERVICE_NAME-config
+  data:
+    AI_AUTH_TOKEN_URL: <<AI_AUTH_TOKEN_URL>>
+    AUDIT_SERVICE: http://audit-service.audit-service.svc.cluster.local:8080/audit-service
+    AUTH_SERVICE_URL : http://auth-service.auth-service.svc.cluster.local:8080
+    CLIENT_ID: <<CLIENT_ID>>
+    CLIENT_SECRET: <<CLIENT_SECRET>>
+    CONTAINER_PORT: 8080
+    KMS_ID: <<KMS_ID>>
+    LIQUIBASE_CONTEXT: <<LIQUIBASE_CONTEXT>>
+    prop.sensitive.keys: DB_USERNAME,DB_PASSWORD
+    SESSION_SERVICE_URL: http://session-service.session-service.svc.cluster.local:8080
+    spring.profiles.active: sit
+    WELLKNOWN_SERVICE_URL: http://wellknown-service.wellknown-service.svc.cluster.local:8080/wellknown-service
+    ELASTICCACHE_URL: rediss://mib-sit-serverless-qnxbw5.serverless.euw1.cache.amazonaws.com:6379
+
+secret:
+  name: HELM_SERVICE_NAME-db-secret
+  data:
+    DB_NAME: <<DB_NAME>>
+    DB_PASSWORD: <<DB_PASSWORD>>
+    DB_PORT: <<DB_PORT>>
+    DB_SCHEMA: <<DB_SCHEMA>>
+    DB_URL: <<DB_URL>>
+    DB_USERNAME: <<DB_USERNAME>>
+    PROP_DEC_KEY: <<PROP_DEC_KEY>>
+    
+resources:
+  requests:
+    cpu: "300m"
+    memory: "512Mi"
+  limits:
+    cpu: "600m"
+    memory: "1Gi"
+
+truststore:
+  javaHome: /usr/lib/jvm/java-21-amazon-corretto
+
+ingress:
+  enabled: HELM_INGRESS_ENABLED
+  name: HELM_SERVICE_NAME-ingress
+  tls:
+    secretName: HELM_SERVICE_NAME-ingress-tls
+    cert: |
+      <<tls_cert>>
+    key: |
+      <<tls_key>>
+
+host: "HELM_INGRESS_HOST"
+
+paths:
+  - path: /HELM_SERVICE_NAME
+    pathType: Prefix
+    service:
+      name: HELM_SERVICE_NAME
+      port: 8080

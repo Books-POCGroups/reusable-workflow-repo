@@ -1,0 +1,23 @@
+{{/*
+  This is a Helm library partial for a Service manifest.
+  To use in a consuming chart, call:
+    {{ include "mib-common.service" . }}
+  This file does not render any resources by itself.
+*/}}
+{{- define "mib-common.service" -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    app: {{ .Release.Name }}
+  ports:
+    - protocol: TCP
+      port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.containerPort }}
+{{- end -}}

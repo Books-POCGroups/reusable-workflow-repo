@@ -1,0 +1,66 @@
+{{/*
+  This is a Helm library partial for an Ingress manifest.
+  To use in a consuming chart, call:
+    {{ include "mib-common.ingress" . }}
+  This file does not render any resources by itself.
+*/}}
+{{- define "mib-common.ingress" -}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Values.ingress.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- if .Values.labels }}
+    {{- toYaml .Values.labels | nindent 4 }}
+    {{- else }}
+    app: {{ .Values.service.name | default .Values.ingress.name }}
+    {{- end }}
+  {{- $annotations := dict }}
+  {{- if eq .Values.ingress.className "alb" }}
+  {{- $alb := .Values.ingress.alb | default dict }}
+  {{- $_ := set $annotations "alb.ingress.kubernetes.io/scheme" ($alb.scheme | default "internal") }}
+  {{- $_ := set $annotations "alb.ingress.kubernetes.io/target-type" ($alb.targetType | default "ip") }}
+  {{- $_ := set $annotations "alb.ingress.kubernetes.io/tags" "ApplicationName=MIB,DataClassification=Confidential,BusinessCriticality=BusinessUnitCritical,BusinessUnit=CBGDigital,CostCenter=338-CE3374" }}
+  {{- if $alb.certificateArn }}
+  {{- $_ := set $annotations "alb.ingress.kubernetes.io/certificate-arn" $alb.certificateArn }}
+  {{- end }}
+  {{- if $alb.groupName }}
+  {{- $_ := set $annotations "alb.ingress.kubernetes.io/group.name" $alb.groupName }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.ingress.annotations }}
+  {{- $annotations = merge $annotations . }}
+  {{- end }}
+  {{- if $annotations }}
+  annotations:
+  {{- toYaml $annotations | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    - hosts:
+      - {{ required "ERROR: .Values.host is required when tls is defined!" .Values.host }}
+      {{- if ne .Values.ingress.className "alb" }}
+      secretName: {{ include "mib-common.tlsSecretName" . }}
+      {{- end }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.host }}
+      http:
+        paths:
+        {{- range .Values.paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType | default "Prefix" }}
+            backend:
+              service:
+                name: {{ .service.name }}
+                port:
+                  number: {{ .service.port }}
+        {{- end }}
+{{- end }}
+{{- end -}}

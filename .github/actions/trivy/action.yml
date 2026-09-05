@@ -1,0 +1,144 @@
+name: "Trivy Scan"
+description: "Run Trivy vulnerability scans on container images or file systems"
+
+inputs:
+  scan_type:
+    description: "Type of scan: image, fs, rootfs, sbom"
+    required: true
+  scan_ref:
+    description: "Reference to scan (image name or file path)"
+    required: true
+  severity:
+    description: "Severity levels to report"
+    required: false
+    default: "MEDIUM,HIGH,CRITICAL"
+  output_file:
+    description: "File to write scan results"
+    required: false
+    default: "trivy_output.txt"
+  ignore_file:
+    description: "Path to Trivy ignore file"
+    required: false
+    default: "./.trivyignore"
+  scanners:
+    description: "Scanners to use (vuln,secret,config)"
+    required: false
+    default: "vuln"
+  format:
+    description: "Output format (table, json, spdx-json, cyclonedx, etc.)"
+    required: false
+    default: "table"
+  trivy_config:
+    description: "Path to trivy.yaml config file"
+    required: false
+    default: ""
+  ignore_unfixed:
+    description: "Ignore unfixed vulnerabilities"
+    required: false
+    default: "false"
+  cache_dir:
+    description: "Trivy cache directory"
+    required: false
+    default: ""
+  trivy_version:
+    description: "Trivy version to install"
+    required: false
+    default: "v0.71.0"
+  label:
+    description: "Human-readable label for artifact name"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup Trivy
+      uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514  # v0.2.6
+      with:
+        version: ${{ inputs.trivy_version }}
+        cache: true
+
+    - name: Run Trivy vulnerability scanner (with cache-dir)
+      if: ${{ inputs.cache_dir != '' }}
+      id: trivy-with-cache
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+      continue-on-error: true
+      with:
+        scan-type:        ${{ inputs.scan_type }}
+        scan-ref:         ${{ inputs.scan_ref }}
+        severity:         ${{ inputs.severity }}
+        scanners:         ${{ inputs.scanners }}
+        format:           ${{ inputs.format }}
+        exit-code:        1
+        hide-progress:    true
+        ignore-unfixed:   ${{ inputs.ignore_unfixed }}
+        trivyignores:     ${{ inputs.ignore_file }}
+        output:           ${{ inputs.output_file }}
+        trivy-config:     ${{ inputs.trivy_config }}
+        cache-dir:        ${{ inputs.cache_dir }}
+        skip-setup-trivy: true
+
+    - name: Run Trivy vulnerability scanner (without cache-dir)
+      if: ${{ inputs.cache_dir == '' }}
+      id: trivy-without-cache
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+      continue-on-error: true
+      with:
+        scan-type:        ${{ inputs.scan_type }}
+        scan-ref:         ${{ inputs.scan_ref }}
+        severity:         ${{ inputs.severity }}
+        scanners:         ${{ inputs.scanners }}
+        format:           ${{ inputs.format }}
+        exit-code:        1
+        hide-progress:    true
+        ignore-unfixed:   ${{ inputs.ignore_unfixed }}
+        trivyignores:     ${{ inputs.ignore_file }}
+        output:           ${{ inputs.output_file }}
+        trivy-config:     ${{ inputs.trivy_config }}
+        skip-setup-trivy: true
+
+    - name: Publish Trivy Output to Summary
+      if: always() && (steps.trivy-with-cache.outcome == 'failure' || steps.trivy-without-cache.outcome == 'failure')
+      shell: bash
+      run: |
+        if [[ -s "${{ inputs.output_file }}" ]]; then
+          LABEL="${{ inputs.label }}"
+          HEADING="${LABEL:-${{ inputs.scan_type }}}"
+          FILTERED=$(grep -v -E "^(WARN|INFO|2[0-9]{3}-)" "${{ inputs.output_file }}" || true)
+          if [[ -n "$FILTERED" ]]; then
+            {
+              echo "### ❌ Trivy Scan Results — ${HEADING}"
+              echo "<details><summary>Click to expand</summary>"
+              echo ""
+              echo '```'
+              echo "$FILTERED"
+              echo '```'
+              echo "</details>"
+            } >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
+
+    - name: Upload Trivy Scan Result (with label)
+      if: always() && inputs.label != ''
+      uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874  # v4.4.0
+      with:
+        name: trivy-scan-result-${{ inputs.label }}
+        path: ${{ inputs.output_file }}
+        if-no-files-found: ignore
+        retention-days: 7
+
+    - name: Upload Trivy Scan Result (without label)
+      if: always() && inputs.label == ''
+      uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874  # v4.4.0
+      with:
+        name: trivy-scan-result-${{ inputs.scan_type }}
+        path: ${{ inputs.output_file }}
+        if-no-files-found: ignore
+        retention-days: 7
+
+    - name: Check Vulnerabilities
+      if: always() && (steps.trivy-with-cache.outcome == 'failure' || steps.trivy-without-cache.outcome == 'failure')
+      shell: bash
+      run: |
+        echo "❌ Vulnerabilities found by Trivy. Job Failed."
+        exit 1

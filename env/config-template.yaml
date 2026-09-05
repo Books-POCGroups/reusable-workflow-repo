@@ -1,0 +1,2 @@
+arn: AWS_ROLE_ARN
+cluster_name: AWS_EKS_CLUSTER_NAME

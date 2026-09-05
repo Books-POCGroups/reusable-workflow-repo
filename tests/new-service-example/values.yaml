@@ -1,0 +1,49 @@
+
+replicaCount: 1
+
+ingress:
+  enabled: false
+  name: my-spring-app-ingress
+  tls:
+    secretName: my-spring-app-tls
+host: "sit1cint1.mobileapps.adcb.com"
+
+paths:
+  - path: /
+    pathType: Prefix
+    service:
+      name: ai-auth-service
+      port: 8080
+
+image:
+  repository: http-container
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  name: test-service
+  namespace: default
+  type: ClusterIP
+  port: 8080
+  containerPort: 8080
+
+secret:
+  name: test-service-secret
+  data:
+    SECRET_KEY: supersecretkey
+
+configMap:
+  name: test-service-config
+  data:
+    APPLICATION_HOST: test
+    BLABLABLA: TESTING123
+
+resources:
+  requests:
+    cpu: "300m"
+    memory: "1Gi"
+  limits:
+    cpu: "600m"
+    memory: "1Gi"
+    
+

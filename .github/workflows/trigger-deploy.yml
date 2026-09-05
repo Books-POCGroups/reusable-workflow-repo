@@ -1,0 +1,433 @@
+name: Deploy microservice to Kubernetes environment
+run-name: Deploy to ${{ inputs.environment }} - ${{ inputs.service_name }}
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      service_name:
+        required: true
+        type: string
+      skip_env:
+        required: true
+        type: string
+      runner:
+        description: "Codebuild runner for the pipeline"
+        default: codebuild-mib2-rest-deploy-runner
+        type: string
+        required: false
+      # region:
+      #   description: "AWS region to deploy"
+      #   type: choice
+      #   required: true
+      #   options:
+      #     - me-central-1
+      #     - eu-west-1
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+  attestations: read
+
+jobs:
+  deploy:
+    name: Deploy ${{ inputs.domain }}/${{ inputs.service_name }} to ${{ inputs.environment }}
+    runs-on: ${{ inputs.runner }}-${{ github.run_id }}-${{ github.run_attempt }}
+    environment: ${{inputs.environment}}
+    # env:
+    #   AWS_REGION: ${{ inputs.region }}
+    env:
+      SERVICE: ${{ inputs.service_name }}
+      ENVIRONMENT: ${{ inputs.environment }}
+      VALUES_FILE: ./workflow-repo/values/${{ inputs.domain }}/${{ inputs.service_name }}/${{ inputs.environment }}/values.yaml
+      CONFIG_PATH: ./workflow-repo/env/${{ inputs.domain }}/${{ inputs.service_name }}/${{ inputs.environment }}/config.yaml
+      NAMESPACE: ${{ inputs.service_name }}
+    steps:
+      - name: Decide whether to deploy
+        id: guard
+        run: |
+          echo "Deciding whether to skip deployment for environment: ${{ inputs.environment }}"
+          echo "Service: ${{ inputs.service_name }} from domain: ${{ inputs.domain }}"
+          skip_env=${{ inputs.skip_env }}
+          env=${{ inputs.environment }}
+          if [[ ",$skip_env," == *",$env,"* ]]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+        shell: bash
+
+      - name: Download Docker Image Artifact
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ServiceBuildRef
+          path: .
+
+      - name: Download Complete Repository Artifact
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: workflow-repo
+          path: ./workflow-repo
+
+      - name: Get AWS caller identity first
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        run: aws sts get-caller-identity
+
+      - name: List files after download
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        run: |
+          echo "Listing files after downloading artifacts"
+          ls -la ./
+          ls -la ./workflow-repo
+          ls -la ./workflow-repo/ssl-cert
+          ls -la ./workflow-repo/ssl-cert/common
+
+      - name: Install yq
+        run: |
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.25.1/yq_linux_amd64 -o /usr/local/bin/yq
+          echo "57b6247bc2406c20a887aee3594399e081759601fd2f8ae9df21938499d76c81  /usr/local/bin/yq" | sha256sum --check
+          echo "✅ yq binary SHA256 checksum verified successfully"
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Read Assume Role ARN from config.yaml
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        id: read-arn
+        run: |
+          echo "Config path: $CONFIG_PATH"
+          ARN=$(yq e '.arn' "$CONFIG_PATH")
+          REGION=$(yq e '.region' "$CONFIG_PATH")
+          echo "Read ARN: $ARN"
+          echo "Read REGION: $REGION"
+          echo "AWS_ASSUME_ROLE_ARN=$ARN" >> $GITHUB_ENV
+          echo "AWS_REGION=$REGION" >> $GITHUB_ENV
+          
+      - name: Assume AWS Role and Export Credentials Securely
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        run: |
+          echo "Assuming role to get temporary credentials..."
+          ROLE_CREDS=$(aws sts assume-role --role-arn "$AWS_ASSUME_ROLE_ARN" --role-session-name AWSCLI-Session)
+
+          ACCESS_KEY_ID=$(echo $ROLE_CREDS | jq -r '.Credentials.AccessKeyId')
+          SECRET_ACCESS_KEY=$(echo $ROLE_CREDS | jq -r '.Credentials.SecretAccessKey')
+          SESSION_TOKEN=$(echo $ROLE_CREDS | jq -r '.Credentials.SessionToken')
+
+          # Mask the credentials to prevent them from appearing in logs
+          echo "::add-mask::$ACCESS_KEY_ID"
+          echo "::add-mask::$SECRET_ACCESS_KEY"
+          echo "::add-mask::$SESSION_TOKEN"
+
+          # Export to environment for use in later steps
+          echo "AWS_ACCESS_KEY_ID=$ACCESS_KEY_ID" >> $GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=$SECRET_ACCESS_KEY" >> $GITHUB_ENV
+          echo "AWS_SESSION_TOKEN=$SESSION_TOKEN" >> $GITHUB_ENV
+      - name: modify values.yaml with tag
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        run: |
+          echo "Modifying values.yaml to set the image tag"
+          echo "Using values file: $VALUES_FILE"
+          IMAGE_REF=$(cat ./image_ref.txt)
+          echo "Image reference to set: $IMAGE_REF"
+          IMAGE_TAG=$(echo "$IMAGE_REF" | awk -F: '{print $2}')
+          echo "Extracted image tag: $IMAGE_TAG"
+          sed -i "s|tag:.*|tag: $IMAGE_TAG|" "$VALUES_FILE"
+          echo "Modified values.yaml content:"
+          cat "$VALUES_FILE"
+
+      - name: Build Combined Truststore
+        
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        run: |
+          set -e
+
+          DOMAIN="${{ github.event.inputs.domain }}"
+          SERVICE="${{ inputs.service_name }}"
+          ENV="${{ inputs.environment }}"
+          STORE_PASSWORD="changeit"
+
+          echo "Domain: $DOMAIN"
+          echo "Service: $SERVICE"
+          echo "Environment: $ENV"
+
+          # Working directory
+          WORK_DIR=truststore-work
+          mkdir -p $WORK_DIR
+
+          # Copy base common truststore
+          cp ./workflow-repo/ssl-cert/common/common-truststore.jks $WORK_DIR/combined-truststore.jks
+
+          # -------------------------------------------------
+          # Import common domain certificates
+          # -------------------------------------------------
+          if [ -d "./workflow-repo/ssl-cert/common/$DOMAIN" ]; then
+            for cert in ./workflow-repo/ssl-cert/common/$DOMAIN/*.crt; do
+              if [ -f "$cert" ]; then
+                alias=$(basename "$cert" .crt)
+                echo "Importing common cert: $alias"
+                keytool -importcert \
+                  -noprompt \
+                  -trustcacerts \
+                  -alias "common-$alias" \
+                  -file "$cert" \
+                  -keystore "$WORK_DIR/combined-truststore.jks" \
+                  -storepass "$STORE_PASSWORD"
+              fi
+            done
+          fi
+
+          # -------------------------------------------------
+          # Import service-specific certificates
+          # -------------------------------------------------
+          if [ -d "./workflow-repo/ssl-cert/$DOMAIN/$SERVICE/$ENV" ]; then
+            for cert in ./workflow-repo/ssl-cert/$DOMAIN/$SERVICE/$ENV/*.crt; do
+              if [ -f "$cert" ]; then
+                alias=$(basename "$cert" .crt)
+                echo "Importing service cert: $alias"
+                keytool -importcert \
+                  -noprompt \
+                  -trustcacerts \
+                  -alias "svc-$alias" \
+                  -file "$cert" \
+                  -keystore "$WORK_DIR/combined-truststore.jks" \
+                  -storepass "$STORE_PASSWORD"
+              fi
+            done
+          else
+            echo "No service-specific cert folder found. Using common truststore only."
+          fi
+
+          # -------------------------------------------------
+          # Copy to Helm chart files folder
+          # -------------------------------------------------
+          CHART_PATH="./workflow-repo/helm/charts/$DOMAIN/$SERVICE"
+          mkdir -p "$CHART_PATH/files"
+          cp "$WORK_DIR/combined-truststore.jks" "$CHART_PATH/files/"
+
+          echo "Truststore generated successfully."
+ 
+      - name: Auto-replace placeholders from Secrets Manager (Safe Mode)
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        shell: bash
+        run: |
+          echo "Starting placeholder resolution"
+          echo "Values file: $VALUES_FILE"
+          echo "Service: $SERVICE"
+          echo "----------------------------------------"
+
+          INVALID_VALUES=("None" "none" "null" "NULL" "" "{}" " ")
+
+          check_invalid() {
+            local v="$(echo "$1" | xargs || true)"
+            [[ -z "$v" ]] && return 1
+            for bad in "${INVALID_VALUES[@]}"; do
+              [[ "$v" == "$bad" ]] && return 1
+            done
+            return 0
+          }
+
+          KEYS=$(yq e '.. | select(tag=="!!str" and test("^<<.*>>$")) | path | .[-1]' "$VALUES_FILE")
+          echo "Detected keys: $KEYS"
+          echo "----------------------------------------"
+
+          # Pre-fetch all service_* secrets once
+          SECRET_ARNS=$(aws secretsmanager list-secrets \
+            --query "SecretList[?starts_with(Name, '$SERVICE')].ARN" \
+            --output text 2>/dev/null || true)
+          declare -A SECRET_JSONS
+          for arn in $SECRET_ARNS; do
+            JSON=$(aws secretsmanager get-secret-value --secret-id "$arn" \
+              --query "SecretString" --output text 2>/dev/null || true)
+            SECRET_JSONS["$arn"]="$JSON"
+          done
+
+          for key in $KEYS; do
+
+            echo "Resolving key: $key"
+            VALUE=""
+
+            # 1. Direct Secrets Manager
+            if [[ -z "$VALUE" ]]; then
+              DIRECT_SECRET="${SERVICE}_$key"
+              RAW_SECRET=$(aws secretsmanager get-secret-value --secret-id "$DIRECT_SECRET" \
+                --query "SecretString" --output text 2>/dev/null || true)
+              RAW_SECRET=$(echo "$RAW_SECRET" | xargs || true)
+              if [[ -z "$RAW_SECRET" ]]; then
+                echo "[WARN] Direct Secret $DIRECT_SECRET is empty" >&2
+              fi
+
+              # Only parse JSON if it’s valid JSON
+              if check_invalid "$RAW_SECRET"; then
+                if echo "$RAW_SECRET" | jq -e . >/dev/null 2>&1; then
+                  if echo "$RAW_SECRET" | jq 'has("data")' | grep -q true 2>/dev/null; then
+                    NESTED=$(echo "$RAW_SECRET" | jq -r --arg k "$key" '.data[$k] // empty')
+                  else
+                    NESTED=$(echo "$RAW_SECRET" | jq -r --arg k "$key" '.[$k] // empty')
+                  fi
+                  [[ $(check_invalid "$NESTED"; echo $?) -eq 0 ]] && VALUE="$NESTED" && echo "✔ Loaded from SecretsManager JSON: $DIRECT_SECRET"
+                else
+                  VALUE="$RAW_SECRET"
+                  echo "✔ Loaded from SecretsManager string: $DIRECT_SECRET"
+                fi
+              fi
+            fi
+
+            # 3️⃣ Fallback: all service_* secrets
+            if [[ -z "$VALUE" ]]; then
+              for arn in "${!SECRET_JSONS[@]}"; do
+                JSON="${SECRET_JSONS[$arn]}"
+                [[ ! $(check_invalid "$JSON"; echo $?) -eq 0 ]] && continue
+                if echo "$JSON" | jq -e . >/dev/null 2>&1; then
+                  if echo "$JSON" | jq 'has("data")' | grep -q true 2>/dev/null; then
+                    FOUND=$(echo "$JSON" | jq -r --arg k "$key" '.data[$k] // empty')
+                  else
+                    FOUND=$(echo "$JSON" | jq -r --arg k "$key" '.[$k] // empty')
+                  fi
+                  [[ $(check_invalid "$FOUND"; echo $?) -eq 0 ]] && VALUE="$FOUND" && echo "✔ Loaded from fallback secret: $arn" && break
+                fi
+              done
+            fi
+
+            # 4️⃣ Still empty → leave placeholder
+            [[ -z "$VALUE" ]] && { echo "⚠ No value found for key: $key"; continue; }
+
+            # 5️⃣ Replace safely
+            sed -i "s|<<$key>>|$VALUE|g" "$VALUES_FILE"
+            echo "✔ Replaced <<$key>>"
+          done
+
+      - name: Setup kubectl
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        run: |
+          echo "Updating up kubectl..."
+          CLUSTER_NAME=$(yq e '.cluster_name' "$CONFIG_PATH")
+          echo "Connect with Auto Loan EKS cluster : $CLUSTER_NAME"
+          aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+        # Removing from this step because namespace creation is handled by Helm Chart now with --create-namespace, which creates in case it doesn't exist and does nothing if it exists
+        # if ! kubectl get ns ${{ inputs.domain }} >/dev/null 2>&1; then
+        #   kubectl create ns ${{ inputs.domain }}
+        # fi
+
+      - name: Setup Helm
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v3.12.1
+
+      # TODO: This step will be removed once we migrate all services to ALB Ingress, which uses ACM to store certificates
+      - name: Fetch TLS secrets for Ingress
+        id: fetch
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        continue-on-error: true
+        run: |
+          echo "Fetching TLS secrets from Secrets Manager"
+          ING_FILE="./workflow-repo/values/${{ inputs.domain }}/${{ inputs.service_name }}/${{ inputs.environment }}/values.yaml"
+          TMP_FILE="/tmp/ingress_values.yaml"
+          SERVICE="${{ inputs.service_name }}"
+
+          echo "Processing ingress file: $ING_FILE"
+
+          # Copy original file to temp
+          cp "$ING_FILE" "$TMP_FILE"
+
+          # Detect only <<tls_cert>> and <<tls_key>> placeholders
+          PLACEHOLDERS=$(grep -oE "<<(tls_cert|tls_key)>>" "$TMP_FILE" | sed 's/[<>]//g')
+
+          # Replace each placeholder with AWS Secrets Manager value
+
+          for key in $PLACEHOLDERS; do
+            SECRET_NAME="${SERVICE}_${key}"
+            echo "Fetching AWS secret: $SECRET_NAME"
+
+            if ! VALUE=$(aws secretsmanager get-secret-value \
+              --secret-id "$SECRET_NAME" \
+              --query "SecretString" \
+              --output text 2>/dev/null); then
+              echo "Secret $SECRET_NAME not found — using empty value"
+              VALUE=""
+            fi
+            if [[ -z "$VALUE" || "$VALUE" == "None" ]]; then
+              echo "✖ Secret $SECRET_NAME is empty or missing"
+            fi
+
+            # Indent each line for YAML block
+            INDENT="      "
+            echo "$VALUE" | sed "s/^/$INDENT/" > /tmp/secret.txt
+
+            # Replace placeholder using awk
+            awk -v key="<<$key>>" -v file="/tmp/secret.txt" '
+            {
+              if (index($0, key)) {
+                while ((getline line < file) > 0) print line
+                close(file)
+              } else {
+                print
+              }
+            }' "$TMP_FILE" > "$TMP_FILE.new" && mv "$TMP_FILE.new" "$TMP_FILE"
+
+            # Indent each line for YAML block
+            INDENT="      "
+            echo "$VALUE" | sed "s/^/$INDENT/" > /tmp/secret.txt
+
+            # Replace placeholder using awk
+            awk -v key="<<$key>>" -v file="/tmp/secret.txt" '
+            {
+              if (index($0, key)) {
+                while ((getline line < file) > 0) print line
+                close(file)
+              } else {
+                print
+              }
+            }' "$TMP_FILE" > "$TMP_FILE.new" && mv "$TMP_FILE.new" "$TMP_FILE"
+
+            echo "✔ Replaced <<$key>> with secret value"
+          done
+          echo "All placeholders replaced successfully."
+          mv "$TMP_FILE" "$ING_FILE"
+          echo "All TLS placeholders (if any) replaced successfully."
+
+      - name: Delete existing ingress Helm release if present
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        run: |
+          RELEASE_NAME="${{ inputs.service_name }}-ingress"
+          NAMESPACE="${{ inputs.service_name }}"
+          echo "Checking if Helm release $RELEASE_NAME exists in namespace $NAMESPACE..."
+          if helm status "$RELEASE_NAME" -n "$NAMESPACE" > /dev/null 2>&1; then
+            echo "Helm release $RELEASE_NAME exists. Deleting..."
+            helm uninstall "$RELEASE_NAME" -n "$NAMESPACE"
+          else
+            echo "Helm release $RELEASE_NAME does not exist. Skipping uninstall."
+          fi
+
+      - name: Deploy Helm Chart
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        run: |
+          echo "Deploying Helm chart for ${{ inputs.service_name }}..."
+          VALUES_FILE=./workflow-repo/values/${{ inputs.domain }}/${{ inputs.service_name }}/${{ inputs.environment }}/values.yaml
+          if [ -f "$VALUES_FILE" ]; then
+            NAMESPACE=$(yq e '.namespace' "$VALUES_FILE" 2>/dev/null)
+            if [ -z "$NAMESPACE" ] || [ "$NAMESPACE" = "null" ]; then
+              NAMESPACE="${{ inputs.service_name }}"
+              echo "Namespace not found in values.yaml, using service_name: $NAMESPACE"
+            else
+              echo "Namespace found in values.yaml: $NAMESPACE"
+            fi
+          else
+            NAMESPACE="${{ inputs.service_name }}"
+            echo "values.yaml not found, using service_name: $NAMESPACE"
+          fi
+          cd ./workflow-repo/helm/charts/${{ inputs.domain }}/${{ inputs.service_name }}
+          echo "Installing Helm dependencies"
+          helm dependency build
+          cd ../../../../..
+          echo "Running Helm upgrade/install command"
+          helm upgrade --install ${{ inputs.service_name }} ./workflow-repo/helm/charts/${{ inputs.domain }}/${{ inputs.service_name }} \
+            --values ./workflow-repo/values/${{ inputs.domain }}/${{ inputs.service_name }}/${{ inputs.environment }}/values.yaml \
+            --namespace "$NAMESPACE" --create-namespace

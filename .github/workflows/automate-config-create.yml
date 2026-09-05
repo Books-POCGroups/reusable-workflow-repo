@@ -1,0 +1,201 @@
+###############################################
+# Create Service Scaffold
+#
+# This workflow automates the onboarding of a new
+# microservice into the workflow repository.
+#
+# It:
+#   - Checks if a template service exists
+#   - Checks if the new service already exists
+#   - Creates a new feature branch
+#   - Clones full folder structure and config files
+#     from the template service
+#   - Optionally replaces service name inside YAMLs
+#   - Opens a Pull Request to main branch
+#
+# Trigger:
+#   - Manual workflow dispatch
+#
+# Inputs:
+#   service:  New microservice name
+#   template: Existing service used as a template
+###############################################
+
+name: Onboard new Service
+run-name: "Create `${{ inputs.service }}` scaffold on domain `${{ inputs.domain }}` for `${{ inputs.environment }}` environment"
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "New microservice name (e.g., ms-name)"
+        required: true
+        type: string
+      domain:
+        description: 'Domain of the service (eg: books)'
+        type: choice
+        default: books
+        options:
+          - books
+        required: true
+      environment:
+        description: "Target environment for the new service (eg: sit, uat, preprod, prod)"
+        required: true
+        type: choice
+        default: sit
+        options:
+          - sit
+          - uat
+          - preprod
+          - prod
+      needs-custom-certs:
+        description: "Does the new service require custom SSL certificates? (Default: No - will use default certs)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  scaffold:
+    name: Generate new Service Scaffold
+    runs-on: ubuntu-latest
+    env:
+      SERVICE: ${{ inputs.service }}
+      DOMAIN: ${{ inputs.domain }}
+      ENVIRONMENT: ${{ inputs.environment }}
+      BRANCH: chore/add-svc-${{ inputs.domain }}-${{ inputs.service }}
+    steps:
+
+      ###########################################################
+      # Checkout repository
+      ###########################################################
+      - name: Checkout workflow repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 #v7.0.0
+
+      ###########################################################
+      # Ensure new service does NOT already exist
+      ###########################################################
+      - name: Check if new service already exists
+        run: |
+          if [ -d "secrets/${DOMAIN}/${SERVICE}" ]; then
+            echo "❌ Service '${SERVICE}' already exists under domain ${DOMAIN}. Aborting."
+            exit 1
+          fi
+
+      ###########################################################
+      # Create working branch
+      ###########################################################
+      - name: Create feature branch
+        run: git checkout -b "$BRANCH"
+
+      ###########################################################
+      # Create new service using onboard-new-service.sh
+      ###########################################################
+      - name: Run service onboarding script
+        run: |
+          NEEDS_CUSTOM_CERTS=${{ inputs.needs-custom-certs }}
+          bash scripts/onboard-new-ms.sh create ${{ env.DOMAIN }} ${{ env.SERVICE }} ${{ env.ENVIRONMENT }}
+
+      - if: ${{ inputs.needs-custom-certs == true }}
+        name: Optional - Add custom certs directory
+        run: |
+          bash scripts/onboard-new-ms.sh include-custom-certs ${{ env.DOMAIN }} ${{ env.SERVICE }} ${{ env.ENVIRONMENT }}
+
+      ###########################################################
+      # Commit changes
+      ###########################################################
+      - name: Commit scaffold changes
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add .
+          git commit -m "chore(ServiceOnboarding): Scaffold created for service '${SERVICE}'"
+
+      ###########################################################
+      # Push branch
+      ###########################################################
+      - name: Push new branch
+        run: |
+          git push -u origin "$BRANCH"
+
+      ###########################################################
+      # Create Pull Request
+      ###########################################################
+      - name: Create Pull Request
+        id: create_pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_TITLE="Scaffold new service: ${{ env.SERVICE }} for ${{ env.ENVIRONMENT }} env (under domain: ${{ env.DOMAIN }})"
+
+          PR_BODY='## New Service Scaffold Generated
+            **Service:** `${{ env.SERVICE }}`
+            **Domain:** `${{ env.DOMAIN }}`
+            **Environment:** `${{ env.ENVIRONMENT }}`
+
+            This PR was generated automatically using the scaffolding workflow.
+
+            ### Included Folders:
+            - `env/${{ env.DOMAIN }}/${{ env.SERVICE }}`
+            - `helm/charts/${{ env.DOMAIN }}/${{ env.SERVICE }}`
+            - `secrets/${{ env.DOMAIN }}/${{ env.SERVICE }}`
+            - `values/${{ env.DOMAIN }}/${{ env.SERVICE }}` 
+
+            All configs were cloned from the template files.
+            > Please review and adjust ALL the service-specific settings as needed.
+            > ** Secrets (`secrets/${{ env.DOMAIN }}/${{ env.SERVICE }}/${{env.ENVIRONMENT}}`) are created as empty placeholders and must be populated manually. **
+
+            Template files used:
+              - `env/config-template.yaml`
+              - `helm/charts/${{ env.DOMAIN }}/sample-template/`
+              - `secrets/config-template.yml`
+              - `values/${{ env.DOMAIN }}/values-template.yaml`'
+
+          gh pr create --draft --base main --head "${{ env.BRANCH }}" --title "$PR_TITLE" --body "$PR_BODY" > pr_output.txt
+          
+          PR_NUMBER=$(cat pr_output.txt | grep -oE '[0-9]+' | head -1)
+          PR_URL=$(cat pr_output.txt | grep -oE 'https://github\.com/[^ ]+' | head -1 )
+          echo "pull-request-number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "pull-request-url=$PR_URL" >> $GITHUB_OUTPUT
+          
+        # --label "new-microservice" --label "service-onboarding" --label "${{ env.DOMAIN }}" --label "${{ env.ENVIRONMENT }}"
+      
+      ###########################################################
+      # Display success message
+      ###########################################################
+      - name: Output PR information on Github step summary
+        run: |
+          echo "Pull Request Number - ${{ steps.create_pr.outputs.pull-request-number }}"
+          echo "Pull Request URL - ${{ steps.create_pr.outputs.pull-request-url }}"
+
+          # Output PR info to the GitHub Actions run summary
+          echo "### :tada: Pull Request Created" >> $GITHUB_STEP_SUMMARY
+          echo "- **Number:** ${{ steps.create_pr.outputs.pull-request-number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL:** [View Pull Request](${{ steps.create_pr.outputs.pull-request-url }})" >> $GITHUB_STEP_SUMMARY
+          echo '## New Service Scaffold Generated
+            **Service:** `${{ env.SERVICE }}`
+            **Domain:** `${{ env.DOMAIN }}`
+            **Environment:** `${{ env.ENVIRONMENT }}`
+
+            This PR was generated automatically using the scaffolding workflow.
+
+            ### Included Folders:
+            - `env/${{ env.DOMAIN }}/${{ env.SERVICE }}`
+            - `helm/charts/${{ env.DOMAIN }}/${{ env.SERVICE }}`
+            - `secrets/${{ env.DOMAIN }}/${{ env.SERVICE }}`
+            - `values/${{ env.DOMAIN }}/${{ env.SERVICE }}` 
+
+            All configs were cloned from the template files.
+            > Please review and adjust ALL the service-specific settings as needed.
+            > ** Secrets (`secrets/${{ env.DOMAIN }}/${{ env.SERVICE }}/${{env.ENVIRONMENT}}`) are created as empty placeholders and must be populated manually. **
+
+            Template files used:
+              - `env/config-template.yaml`
+              - `helm/charts/${{ env.DOMAIN }}/sample-template/`
+              - `secrets/config-template.yml`
+              - `values/${{ env.DOMAIN }}/values-template.yaml`' >> $GITHUB_STEP_SUMMARY
+
+          echo -e "\033[1;32m✔ Scaffold workflow completed successfully.\033[0m"
