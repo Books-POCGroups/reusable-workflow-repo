@@ -1,0 +1,174 @@
+name: Micro Service Build & Publish JAR
+
+on:
+  workflow_call:
+    inputs:
+      domain:
+        description: "Domain of the service (eg: cciam, mib)"
+        type: string
+        required: true
+      type:
+        description: "Type of the application"
+        type: string
+        required: true
+        default: "springboot"
+      service_name:
+        description: "Name of the service (must match the Maven artifactId)"
+        type: string
+        required: true
+      project_path:
+        description: "Path to project folder (containing pom.xml)"
+        type: string
+        required: true
+      java_version:
+        description: "JDK version to build with"
+        type: string
+        required: false
+        default: "17"
+      version_bump:
+        description: "Which part of the version to bump: major, minor, or patch"
+        type: string
+        required: false
+        default: "patch"
+      runner:
+        description: "Codebuild runner for the pipeline"
+        default: codebuild-myapp-sandbox-v3-runner
+        type: string
+        required: true
+    secrets:
+      GH_PAT_TOKEN:
+        description: "GitHub Personal Access Token (needs packages:write and repo access)"
+        required: true
+    outputs:
+      published_version:
+        description: "The version that was published"
+        value: ${{ jobs.build-and-publish.outputs.published_version }}
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  build-and-publish:
+    name: Build & Publish JAR - ${{ inputs.service_name }}
+    runs-on: codebuild-myapp-sandbox-v3-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      published_version: ${{ steps.next_version.outputs.new_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Initiate Build
+        run: echo "Build started for ${{ inputs.service_name }}"
+
+      - name: Set up JDK ${{ inputs.java_version }}
+        uses: actions/setup-java@7a6d8a8234af8eb26422e24e3006232cccaa061b # v5.0.0
+        with:
+          java-version: ${{ inputs.java_version }}
+          distribution: temurin
+          server-id: github
+          # setup-java writes a settings.xml with the "github" server block that
+          # reads GITHUB_ACTOR / GITHUB_TOKEN env vars at deploy time (see below).
+
+      - name: Get last published version from GitHub Packages
+        id: last_version
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT_TOKEN }}
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="${{ inputs.service_name }}"
+          OWNER="${{ github.repository_owner }}"
+
+          # GitHub Packages (Maven) versions live under the org/user packages API.
+          # 404 simply means nothing has been published yet -> start at 0.0.0
+          RESPONSE=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${OWNER}/packages/maven/${PACKAGE_NAME}/versions" || true)
+
+          LAST_VERSION=$(echo "$RESPONSE" \
+            | jq -r '[.[]?.name] | map(select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))
+                     | sort_by(split(".") | map(tonumber)) | last // "0.0.0"')
+
+          if [ -z "$LAST_VERSION" ] || [ "$LAST_VERSION" = "null" ]; then
+            LAST_VERSION="0.0.0"
+          fi
+
+          echo "Last published version: $LAST_VERSION"
+          echo "last_version=$LAST_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Compute next version
+        id: next_version
+        run: |
+          set -euo pipefail
+          LAST_VERSION="${{ steps.last_version.outputs.last_version }}"
+          BUMP="${{ inputs.version_bump }}"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LAST_VERSION"
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+
+          case "$BUMP" in
+            major)
+              MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
+              ;;
+            minor)
+              MINOR=$((MINOR + 1)); PATCH=0
+              ;;
+            patch|*)
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "New version to publish: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Set project version
+        working-directory: ${{ inputs.project_path }}
+        run: |
+          mvn -B versions:set \
+            -DnewVersion="${{ steps.next_version.outputs.new_version }}" \
+            -DgenerateBackupPoms=false
+
+      - name: Build JAR
+        working-directory: ${{ inputs.project_path }}
+        run: mvn -B clean package -DskipTests
+
+      - name: Publish JAR to GitHub Packages
+        working-directory: ${{ inputs.project_path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT_TOKEN }}
+        run: mvn -B deploy -DskipTests
+
+      - name: Tag published version
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.service_name }}-v${{ steps.next_version.outputs.new_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Upload JAR as workflow artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: ${{ inputs.service_name }}-jar
+          path: ${{ inputs.project_path }}/target/*.jar
+          retention-days: 10
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Write summary
+        run: |
+          {
+            echo "## Publish Summary"
+            echo "**Service:** \`${{ inputs.service_name }}\`"
+            echo "**Previous Version:** \`${{ steps.last_version.outputs.last_version }}\`"
+            echo "**Published Version:** \`${{ steps.next_version.outputs.new_version }}\`"
+            echo "**Registry:** GitHub Packages (Maven) - ${{ github.repository_owner }}"
+          } >> "$GITHUB_STEP_SUMMARY"
