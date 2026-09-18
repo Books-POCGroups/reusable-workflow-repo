@@ -80,8 +80,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT_TOKEN }}
         run: |
           set -euo pipefail
-          PACKAGE_NAME="${{ inputs.service_name }}"
+
+          # GitHub Packages registers Maven packages as "groupId.artifactId",
+          # not just the artifactId — resolve both straight from the pom so we
+          # never guess/hardcode the wrong package name.
+          GROUP_ID=$(mvn -q -f "${{ inputs.project_path }}/pom.xml" \
+            help:evaluate -Dexpression=project.groupId -DforceStdout)
+          ARTIFACT_ID=$(mvn -q -f "${{ inputs.project_path }}/pom.xml" \
+            help:evaluate -Dexpression=project.artifactId -DforceStdout)
+          PACKAGE_NAME="${GROUP_ID}.${ARTIFACT_ID}"
           OWNER="${{ github.repository_owner }}"
+
+          echo "Resolved package name: $PACKAGE_NAME"
 
           HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -107,7 +117,6 @@ jobs:
 
           echo "Last published version: $LAST_VERSION"
           echo "last_version=$LAST_VERSION" >> "$GITHUB_OUTPUT"
-          
 
       - name: Compute next version
         id: next_version
