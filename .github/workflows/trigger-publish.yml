@@ -52,7 +52,7 @@ permissions:
 jobs:
   build-and-publish:
     name: Build & Publish JAR - ${{ inputs.service_name }}
-    runs-on: codebuild-myapp-sandbox-v3-runner-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest
     outputs:
       published_version: ${{ steps.next_version.outputs.new_version }}
 
