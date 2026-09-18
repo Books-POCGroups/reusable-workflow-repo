@@ -1,0 +1,3 @@
+arn: arn:aws:iam::694282668401:role/myapp-sandbox-pipeline-admin-role
+cluster_name: myapp-eks
+region: us-east-1
