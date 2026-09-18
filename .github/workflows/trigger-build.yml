@@ -149,16 +149,16 @@ jobs:
         run: |
           docker tag \
           ${{ inputs.service_name }}:${{ github.run_number }} \
-          $ECR_REGISTRY/mib2-microservice-repo:${{ inputs.service_name }}-${{ github.run_number }}
+          $ECR_REGISTRY/books-ms-repo:${{ inputs.service_name }}-${{ github.run_number }}
 
       - name: Push Docker Image to ECR
         run: |
           docker push \
-          $ECR_REGISTRY/mib2-microservice-repo:${{ inputs.service_name }}-${{ github.run_number }}
+          $ECR_REGISTRY/books-ms-repo:${{ inputs.service_name }}-${{ github.run_number }}
 
           echo "Storing image reference into image_ref.txt"
 
-          echo "$ECR_REGISTRY/mib2-microservice-repo:${{ inputs.service_name }}-${{ github.run_number }}" > image_ref.txt
+          echo "$ECR_REGISTRY/books-ms-repo:${{ inputs.service_name }}-${{ github.run_number }}" > image_ref.txt
 
       - name: Upload Service Build Reference
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -182,7 +182,7 @@ jobs:
           {
             echo "## Build Summary"
             echo "**Service:** \`${{ inputs.service_name }}\`"
-            echo "**Docker Image:** \`$ECR_REGISTRY/mib2-microservice-repo:${{ inputs.service_name }}-${{ github.run_number }}\`"
+            echo "**Docker Image:** \`$ECR_REGISTRY/books-ms-repo:${{ inputs.service_name }}-${{ github.run_number }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   deploy-SIT:
