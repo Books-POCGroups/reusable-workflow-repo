@@ -130,12 +130,11 @@ jobs:
           tags: ${{ inputs.service_name }}:${{ github.run_number }}
 
           build-args: |
-            GH_USERNAME=${{ github.actor }}
-            GH_TOKEN=${{ secrets.GH_PAT_TOKEN }}
             PROJECT_PATH=${{ inputs.project_path }}
 
-          #cache-from: type=gha
-          #cache-to: type=gha,mode=max
+          secrets: |
+            "GH_USERNAME=${{ github.actor }}"
+            "GH_TOKEN=${{ secrets.GH_PAT_TOKEN }}"
 
       - name: Scan Docker Image
         if: github.ref == 'refs/heads/main'
