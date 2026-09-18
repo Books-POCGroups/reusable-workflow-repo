@@ -83,22 +83,31 @@ jobs:
           PACKAGE_NAME="${{ inputs.service_name }}"
           OWNER="${{ github.repository_owner }}"
 
-          # GitHub Packages (Maven) versions live under the org/user packages API.
-          # 404 simply means nothing has been published yet -> start at 0.0.0
-          RESPONSE=$(curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/orgs/${OWNER}/packages/maven/${PACKAGE_NAME}/versions" || true)
+            "https://api.github.com/orgs/${OWNER}/packages/maven/${PACKAGE_NAME}/versions")
 
-          LAST_VERSION=$(echo "$RESPONSE" \
-            | jq -r '[.[]?.name] | map(select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))
-                     | sort_by(split(".") | map(tonumber)) | last // "0.0.0"')
+          echo "HTTP status: $HTTP_STATUS"
+          cat response.json
 
-          if [ -z "$LAST_VERSION" ] || [ "$LAST_VERSION" = "null" ]; then
+          if [ "$HTTP_STATUS" = "404" ]; then
+            echo "Package not found yet — starting from 0.0.0"
             LAST_VERSION="0.0.0"
+          elif [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+            LAST_VERSION=$(jq -r '[.[]?.name] | map(select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$")))
+                           | sort_by(split(".") | map(tonumber)) | last // "0.0.0"' response.json)
+            if [ -z "$LAST_VERSION" ] || [ "$LAST_VERSION" = "null" ]; then
+              LAST_VERSION="0.0.0"
+            fi
+          else
+            echo "::error::Unexpected response from GitHub Packages API (status $HTTP_STATUS)"
+            exit 1
           fi
 
           echo "Last published version: $LAST_VERSION"
           echo "last_version=$LAST_VERSION" >> "$GITHUB_OUTPUT"
+          
 
       - name: Compute next version
         id: next_version
