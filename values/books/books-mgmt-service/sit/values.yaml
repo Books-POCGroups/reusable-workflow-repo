@@ -7,13 +7,13 @@ image:
   pullPolicy: IfNotPresent
 
 service:
-  name: mib-ai-service
+  name: books-mgmt-service
   type: ClusterIP
   port: 8080
   containerPort: 8080
 
 configMap:
-  name: ai-auth-app-config
+  name: books-mgmt-app-config
   data:
     APP_CERT_STORE_PATH: /usr/lib/jvm/java-21-amazon-correttose/lib/security/cacerts
     spring.profiles.active: sit
@@ -22,7 +22,7 @@ configMap:
     
 
 secret:
-  name: ai-auth-db-secret
+  name: books-mgmt-db-secret
   data:
     DB_NAME: TEST
     DB_PASSWORD: TEST
