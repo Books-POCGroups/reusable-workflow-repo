@@ -129,6 +129,10 @@ jobs:
           echo "AWS_ACCESS_KEY_ID=$ACCESS_KEY_ID" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=$SECRET_ACCESS_KEY" >> $GITHUB_ENV
           echo "AWS_SESSION_TOKEN=$SESSION_TOKEN" >> $GITHUB_ENV
+
+      - name: Get AWS caller identity second
+        if: ${{ steps.guard.outputs.skip == 'false' }}
+        run: aws sts get-caller-identity
       - name: modify values.yaml with tag
         if: ${{ steps.guard.outputs.skip == 'false' }}
         run: |
