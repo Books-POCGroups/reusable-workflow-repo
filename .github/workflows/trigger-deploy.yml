@@ -313,7 +313,7 @@ jobs:
           echo "Updating up kubectl..."
           CLUSTER_NAME=$(yq e '.cluster_name' "$CONFIG_PATH")
           echo "Connect with Auto Loan EKS cluster : $CLUSTER_NAME"
-          aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+          aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME --role-arn "$AWS_ASSUME_ROLE_ARN"
         # Removing from this step because namespace creation is handled by Helm Chart now with --create-namespace, which creates in case it doesn't exist and does nothing if it exists
         # if ! kubectl get ns ${{ inputs.domain }} >/dev/null 2>&1; then
         #   kubectl create ns ${{ inputs.domain }}
