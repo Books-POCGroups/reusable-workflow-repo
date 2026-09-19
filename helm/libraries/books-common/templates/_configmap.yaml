@@ -4,7 +4,7 @@
     {{ include "mib-common.configmap" . }}
   This file does not render any resources by itself.
 */}}
-{{- define "mib-common.configmap" -}}
+{{- define "books-common.configmap" -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

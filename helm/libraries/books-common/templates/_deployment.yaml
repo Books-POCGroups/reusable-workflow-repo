@@ -4,7 +4,7 @@
     {{ include "mib-common.deployment" . }}
   This file does not render any resources by itself.
 */}}
-{{- define "mib-common.deployment" -}}
+{{- define "books-common.deployment" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

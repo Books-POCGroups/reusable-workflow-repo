@@ -1,10 +1,10 @@
 {{/*
   This is a Helm library partial for an Ingress manifest.
   To use in a consuming chart, call:
-    {{ include "mib-common.ingress" . }}
+    {{ include "books-common.ingress" . }}
   This file does not render any resources by itself.
 */}}
-{{- define "mib-common.ingress" -}}
+{{- define "books-common.ingress" -}}
 {{- if .Values.ingress.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress

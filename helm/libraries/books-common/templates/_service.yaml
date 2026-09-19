@@ -1,10 +1,10 @@
 {{/*
   This is a Helm library partial for a Service manifest.
   To use in a consuming chart, call:
-    {{ include "mib-common.service" . }}
+    {{ include "books-common.service" . }}
   This file does not render any resources by itself.
 */}}
-{{- define "mib-common.service" -}}
+{{- define "books-common.service" -}}
 apiVersion: v1
 kind: Service
 metadata:
