@@ -1,7 +1,7 @@
 {{/*
   This is a Helm library partial for a ConfigMap manifest.
   To use in a consuming chart, call:
-    {{ include "mib-common.configmap" . }}
+    {{ include "books-common.configmap" . }}
   This file does not render any resources by itself.
 */}}
 {{- define "books-common.configmap" -}}

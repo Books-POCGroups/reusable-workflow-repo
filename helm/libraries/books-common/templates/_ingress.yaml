@@ -46,7 +46,7 @@ spec:
     - hosts:
       - {{ required "ERROR: .Values.host is required when tls is defined!" .Values.host }}
       {{- if ne .Values.ingress.className "alb" }}
-      secretName: {{ include "mib-common.tlsSecretName" . }}
+      secretName: {{ include "books-common.tlsSecretName" . }}
       {{- end }}
   {{- end }}
   rules:
