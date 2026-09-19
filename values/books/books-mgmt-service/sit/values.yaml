@@ -48,7 +48,7 @@ ingress:
    key: |
      <<tls_key>>
 
-host: "books-mgmt-service.test.local"
+host: "api-internal.books-service.internal"
 
 paths:
   - path: /books
