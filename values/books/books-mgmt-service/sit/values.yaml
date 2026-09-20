@@ -2,7 +2,7 @@
 replicaCount: 1
 
 image:
-  repository: 654654228171.dkr.ecr.us-east-1.amazonaws.com/books-ms-repo
+  repository: 564398349120.dkr.ecr.us-east-1.amazonaws.com/books-ms-repo
   tag: tag
   pullPolicy: IfNotPresent
 

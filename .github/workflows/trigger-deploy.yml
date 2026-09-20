@@ -18,7 +18,7 @@ on:
         type: string
       runner:
         description: "Codebuild runner for the pipeline"
-        default: codebuild-myapp-sandbox-b540-runner
+        default: codebuild-myapp-sandbox-98a1-runner
         type: string
         required: false
       # region:
