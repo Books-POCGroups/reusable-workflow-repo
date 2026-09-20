@@ -2,15 +2,15 @@
 replicaCount: 1
 
 image:
-  repository: 352100722351.dkr.ecr.us-east-1.amazonaws.com/books-ms-repo
+  repository: 654654228171.dkr.ecr.us-east-1.amazonaws.com/books-ms-repo
   tag: tag
   pullPolicy: IfNotPresent
 
 service:
   name: books-mgmt-service
   type: ClusterIP
-  port: 8080
-  containerPort: 8080
+  port: 9080
+  containerPort: 9080
 
 configMap:
   name: books-mgmt-app-config
@@ -18,14 +18,15 @@ configMap:
     APP_CERT_STORE_PATH: /usr/lib/jvm/java-21-amazon-correttose/lib/security/cacerts
     spring.profiles.active: sit
     LIQUIBASE_CONTEXT: sit
-    CONTAINER_PORT: 8080
+    CONTAINER_PORT: 9080
+    DB_URL: jdbc:postgresql://postgres.myapp.internal:5432/appdb
     
 
 secret:
   name: books-mgmt-db-secret
   data:
-    DB_NAME: TEST
-    DB_PASSWORD: TEST
+    DB_UNAME: <<DB_UNAME>>
+    DB_PASSWORD: <<DB_PASSWORD>>
 
 resources:
   requests:
@@ -51,8 +52,8 @@ ingress:
 host: "api-internal.books-service.internal"
 
 paths:
-  - path: /books
+  - path: /books-service
     pathType: Prefix
     service:
       name: books-mgmt-service
-      port: 8080
+      port: 9080
