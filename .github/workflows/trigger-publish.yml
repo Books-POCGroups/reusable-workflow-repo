@@ -30,11 +30,6 @@ on:
         type: string
         required: false
         default: "patch"
-      runner:
-        description: "Codebuild runner for the pipeline"
-        default: codebuild-myapp-sandbox-v3-runner
-        type: string
-        required: true
     secrets:
       GH_PAT_TOKEN:
         description: "GitHub Personal Access Token (needs packages:write and repo access)"
