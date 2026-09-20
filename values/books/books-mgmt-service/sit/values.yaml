@@ -25,7 +25,7 @@ configMap:
 secret:
   name: books-mgmt-db-secret
   data:
-    DB_UNAME: <<DB_USERNAME>>
+    DB_USERNAME: <<DB_USERNAME>>
     DB_PASSWORD: <<DB_PASSWORD>>
 
 resources:
