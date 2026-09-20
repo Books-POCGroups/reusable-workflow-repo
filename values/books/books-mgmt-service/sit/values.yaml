@@ -43,7 +43,7 @@ ingress:
   enabled: true
   className: alb
   alb:
-    certificateArn: arn:aws:acm:us-east-1:654654228171:certificate/97be1456-6c03-4cc9-b271-a2a0dd02ce79
+    certificateArn: arn:aws:acm:us-east-1:564398349120:certificate/d6af9028-5c0c-459c-a580-cb8a590b50f0
     groupName: myapp-sandbox-alb
   name: books-mgmt-ingress
   tls:
