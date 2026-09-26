@@ -42,7 +42,7 @@ truststore:
 ingress:
   enabled: true
   className: alb
-  group-name: myapp-
+  group-name: myapp-sandbox-alb
   alb:
     certificateArn: arn:aws:acm:us-east-1:287870619366:certificate/003ea16d-eff9-42eb-baff-4aedf3a15c4c
   name: books-mgmt-ingress
