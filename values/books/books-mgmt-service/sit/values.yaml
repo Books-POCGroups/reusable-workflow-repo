@@ -2,7 +2,7 @@
 replicaCount: 1
 
 image:
-  repository: 639493421189.dkr.ecr.us-east-1.amazonaws.com/books-ms-repo
+  repository: 287870619366.dkr.ecr.us-east-1.amazonaws.com/books-ms-repo
   tag: tag
   pullPolicy: IfNotPresent
 
@@ -42,8 +42,9 @@ truststore:
 ingress:
   enabled: true
   className: alb
+  group-name: myapp-
   alb:
-    certificateArn: arn:aws:acm:us-east-1:639493421189:certificate/730c4b1c-a6ff-42be-befe-493eec25c3c9
+    certificateArn: arn:aws:acm:us-east-1:287870619366:certificate/003ea16d-eff9-42eb-baff-4aedf3a15c4c
   name: books-mgmt-ingress
   tls:
    secretName: books-mgmt-ingress-tls
