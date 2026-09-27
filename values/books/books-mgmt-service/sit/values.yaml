@@ -42,6 +42,8 @@ truststore:
 ingress:
   enabled: true
   className: alb
+  annotations:                                                        
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'   
   alb:
     groupName: myapp-sandbox-alb
     certificateArn: arn:aws:acm:us-east-1:771049112668:certificate/e3a92a88-f35d-4601-98a9-c722c6d22c90
