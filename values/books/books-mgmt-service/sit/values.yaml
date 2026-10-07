@@ -2,7 +2,7 @@
 replicaCount: 1
 
 image:
-  repository: 383975042508.dkr.ecr.us-east-1.amazonaws.com/books-ms-repo
+  repository: 654654182107.dkr.ecr.us-east-1.amazonaws.com/books-ms-repo
   tag: tag
   pullPolicy: IfNotPresent
 
@@ -48,7 +48,7 @@ ingress:
     alb.ingress.kubernetes.io/success-codes: "200-401"
   alb:
     groupName: myapp-sandbox-alb
-    certificateArn: arn:aws:acm:us-east-1:383975042508:certificate/7b589e76-fd63-42fb-a22c-29b752ca7f96
+    certificateArn: arn:aws:acm:us-east-1:654654182107:certificate/d85082a8-04bc-4ebb-9098-1e06872626eb
   name: books-mgmt-ingress
   tls:
    secretName: books-mgmt-ingress-tls
